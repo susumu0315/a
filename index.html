@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>resqmej 受注・発注管理</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <a class="brand" href="#/">
+        <span class="brand-mark">R</span>
+        <span class="brand-text"><b>resqmej</b><small>受注・発注管理</small></span>
+      </a>
+      <a class="btn btn-primary btn-block new-order" href="#/orders/new">＋ 新しい受注を登録</a>
+      <nav class="nav">
+        <a href="#/" data-nav="home"><span class="nav-step">⌂</span>ホーム</a>
+        <a href="#/orders" data-nav="orders"><span class="nav-step">1</span>受注</a>
+        <a href="#/pos" data-nav="pos"><span class="nav-step">2</span>発注書</a>
+        <a href="#/deliveries" data-nav="deliveries"><span class="nav-step">3</span>納品書</a>
+        <a href="#/partners" data-nav="partners"><span class="nav-step">◎</span>取引先</a>
+        <a href="#/settings" data-nav="settings"><span class="nav-step">⚙</span>設定</a>
+      </nav>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <form class="search" id="global-search" role="search">
+          <input type="search" name="q" placeholder="番号・会社名で検索（例：JO-2026-0001 / お客様の発注番号）" autocomplete="off">
+          <button class="btn" type="submit">検索</button>
+        </form>
+      </header>
+      <main id="view" class="view"></main>
+    </div>
+  </div>
+
+  <dialog id="partner-dialog" class="dialog">
+    <form method="dialog" id="partner-form">
+      <h2 id="partner-dialog-title">取引先を登録</h2>
+      <div class="grid-2">
+        <div class="field span-2">
+          <label>会社名・氏名 <span class="req">必須</span></label>
+          <input name="name" required placeholder="例：株式会社〇〇">
+        </div>
+        <div class="field">
+          <label>区分</label>
+          <select name="kind">
+            <option value="customer">顧客（受注先・納品先）</option>
+            <option value="supplier">仕入先（発注先）</option>
+            <option value="both">顧客・仕入先の両方</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>敬称</label>
+          <select name="honorific">
+            <option value="御中">御中（会社宛）</option>
+            <option value="様">様（個人宛）</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>郵便番号</label>
+          <input name="zip" placeholder="例：100-0001">
+        </div>
+        <div class="field">
+          <label>電話番号</label>
+          <input name="tel" placeholder="例：03-0000-0000">
+        </div>
+        <div class="field span-2">
+          <label>住所</label>
+          <input name="address" placeholder="例：東京都千代田区…">
+        </div>
+        <div class="field span-2">
+          <label>ご担当者（書類の宛名下に表示）</label>
+          <input name="contact" placeholder="例：購買部 山田様">
+        </div>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" class="btn" data-act="cancel">キャンセル</button>
+        <button type="submit" class="btn btn-primary">保存する</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast-area" aria-live="polite"></div>
+
+  <datalist id="units">
+    <option value="個"><option value="本"><option value="枚"><option value="式"><option value="台">
+    <option value="箱"><option value="セット"><option value="kg"><option value="m"><option value="時間"><option value="件">
+  </datalist>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
