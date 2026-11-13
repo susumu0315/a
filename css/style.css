@@ -217,6 +217,17 @@ table.items .c-price { width: 120px; }
 table.items .c-amt { width: 120px; text-align: right; font-weight: 600; padding-right: 10px; }
 table.items .c-del { width: 44px; text-align: center; }
 table.items .c-name { min-width: 200px; }
+table.items .c-color { width: 170px; }
+table.items select { padding: 6px 8px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 2px; padding: 4px 6px 4px 4px; border-radius: 999px;
+  background: var(--primary-soft); font-weight: 600; font-size: .92rem;
+}
+.chip button { border: none; background: none; cursor: pointer; color: var(--muted); padding: 0 5px; font: inherit; border-radius: 50%; }
+.chip button:disabled { visibility: hidden; }
+.chip .chip-del:hover { color: var(--danger); background: #fdf0f0; }
+.chip .chip-move:hover { color: var(--primary); background: #fff; }
 table.items tr.ref-row td { border-bottom: 1px solid var(--line); padding-top: 0; font-size: .8rem; color: var(--muted); }
 table.items tr.ref-row .over { color: var(--danger); font-weight: 700; }
 .items-foot { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-top: 10px; flex-wrap: wrap; }

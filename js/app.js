@@ -67,9 +67,13 @@ const PARTNERS_DEFAULT = [
   '株式会社ライズ', '久下小学校', 'くらし企画', 'SIAソリューション',
 ].map(name => ({ name, kind: 'customer', honorific: '御中', zip: '', address: '', tel: '', contact: '' }));
 
+// 商品・色マスタの初期値（色は防災品受注管理表のマスタより）
+const PRODUCTS_DEFAULT = [{ name: 'レスキューミー', unit: '個', price: 1250, useColor: true }];
+const COLORS_DEFAULT = ['イエロー', 'レッド', 'ブラック', 'オレンジ', 'ブルー', 'グリーン', 'ピンク', 'ホワイト', 'アーミーグリーン', '蓄光イエロー'];
+
 function defaultData() {
   return {
-    version: 3,
+    version: 4,
     settings: {
       company: { ...COMPANY_DEFAULT },
       showLogo: true,
@@ -78,6 +82,8 @@ function defaultData() {
       prefix: { order: 'JO', po: 'PO', dn: 'DN' },
     },
     partners: PARTNERS_DEFAULT.map(p => ({ id: uid(), ...p })),
+    products: PRODUCTS_DEFAULT.map(p => ({ id: uid(), ...p })),
+    colors: [...COLORS_DEFAULT],
     orders: [],
     pos: [],
     deliveries: [],
@@ -99,6 +105,8 @@ function normalize(d) {
     ...def,
     ...d,
     partners,
+    products: d.products || def.products,
+    colors: d.colors || def.colors,
     version: def.version,
     settings: {
       ...def.settings,
@@ -189,7 +197,33 @@ function orderStatus(o) {
 
 const badge = st => `<span class="badge ${st.cls}">${st.label}</span>`;
 const tag = (no, cls) => (no ? `<span class="no-tag ${cls}">${esc(no)}</span>` : '<span class="muted">—</span>');
-const blankItem = () => ({ id: uid(), name: '', spec: '', qty: 1, unit: '個', price: '' });
+const findProduct = name => db.products.find(p => p.name === name);
+
+// 新しい明細行。品名はマスタの先頭の商品（レスキューミー）を初期選択する
+function blankItem(withPrice = false) {
+  const p = db.products[0];
+  return { id: uid(), name: p?.name || '', spec: '', qty: 1, unit: p?.unit || '個', price: withPrice && p ? p.price : '' };
+}
+
+// 色を使う商品で色が未選択の行があればエラーメッセージを返す
+function itemsError(items) {
+  const i = items.findIndex(it => findProduct(it.name)?.useColor && !it.spec);
+  return i < 0 ? '' : `${i + 1}行目の色を選択してください`;
+}
+
+function productOptions(selected) {
+  const names = db.products.map(p => p.name);
+  if (selected && !names.includes(selected)) names.push(selected);
+  return (selected ? '' : '<option value="">— 品名を選択 —</option>') +
+    names.map(n => `<option ${n === selected ? 'selected' : ''}>${esc(n)}</option>`).join('');
+}
+
+function colorOptions(selected) {
+  const list = [...db.colors];
+  if (selected && !list.includes(selected)) list.push(selected);
+  return '<option value="">— 色を選択 —</option>' +
+    list.map(c => `<option ${c === selected ? 'selected' : ''}>${esc(c)}</option>`).join('');
+}
 
 function cleanItems(items) {
   return items
@@ -222,6 +256,7 @@ const routes = [
   [/^\/deliveries\/([^/]+)\/edit$/, m => viewDnForm(m[1])],
   [/^\/deliveries\/([^/]+)$/, m => viewDocDetail('dn', m[1])],
   [/^\/partners$/, viewPartners],
+  [/^\/masters$/, viewMasters],
   [/^\/settings$/, viewSettings],
   [/^\/search$/, (m, q) => viewSearch(q.get('q') || '')],
 ];
@@ -358,13 +393,13 @@ function chainHTML(o, { currentId, withAdd = true } = {}) {
 }
 
 // 明細入力（行の追加・削除・金額の自動計算）
-function mountItems(root, initialItems, { getRate, refInfo } = {}) {
+function mountItems(root, initialItems, { getRate, refInfo, autoPrice = false } = {}) {
   let items = initialItems;
   root.innerHTML = `
     <div class="items-wrap">
       <table class="items">
         <thead><tr>
-          <th class="c-no">No.</th><th class="c-name">品名</th><th>仕様・型番</th>
+          <th class="c-no">No.</th><th class="c-name">品名</th><th class="c-color">色</th>
           <th class="c-qty">数量</th><th class="c-unit">単位</th><th class="c-price">単価（税抜）</th>
           <th class="c-amt">金額</th><th class="c-del"></th>
         </tr></thead>
@@ -389,8 +424,10 @@ function mountItems(root, initialItems, { getRate, refInfo } = {}) {
     tbody.innerHTML = items.map((it, i) => `
       <tr data-i="${i}">
         <td class="c-no">${i + 1}</td>
-        <td><input data-f="name" value="${esc(it.name)}" placeholder="品名を入力"></td>
-        <td><input data-f="spec" value="${esc(it.spec)}" placeholder="任意"></td>
+        <td><select data-f="name">${productOptions(it.name)}</select></td>
+        <td>${findProduct(it.name)?.useColor === false && !it.spec
+          ? '<span class="muted">—</span>'
+          : `<select data-f="spec">${colorOptions(it.spec)}</select>`}</td>
         <td><input data-f="qty" type="number" step="any" min="0" class="num" value="${esc(it.qty)}"></td>
         <td><input data-f="unit" value="${esc(it.unit)}" list="units"></td>
         <td><input data-f="price" type="number" step="any" class="num" value="${esc(it.price)}" placeholder="0"></td>
@@ -407,6 +444,17 @@ function mountItems(root, initialItems, { getRate, refInfo } = {}) {
     if (!f || !tr) return;
     const i = +tr.dataset.i;
     items[i][f] = e.target.value;
+    if (f === 'name') {
+      // 品名を変えたらマスタの単位・単価を反映
+      const p = findProduct(e.target.value);
+      if (p) {
+        items[i].unit = p.unit;
+        if (autoPrice) items[i].price = p.price;
+        if (!p.useColor) items[i].spec = '';
+      }
+      renderRows();
+      return;
+    }
     $('.c-amt', tr).textContent = num(lineAmount(items[i]));
     const refRow = $(`tr[data-ref-for="${i}"] td:last-child`, tbody);
     if (refRow && refInfo) refRow.innerHTML = refInfo(items[i]);
@@ -415,13 +463,13 @@ function mountItems(root, initialItems, { getRate, refInfo } = {}) {
   root.addEventListener('click', e => {
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (act === 'add-row') {
-      items.push(blankItem());
+      items.push(blankItem(autoPrice));
       renderRows();
-      $$('tr[data-i]', tbody).pop().querySelector('input').focus();
+      $$('tr[data-i]', tbody).pop().querySelector('[data-f=spec], [data-f=qty]').focus();
     } else if (act === 'del-row') {
       const i = +e.target.closest('tr[data-i]').dataset.i;
       items.splice(i, 1);
-      if (!items.length) items.push(blankItem());
+      if (!items.length) items.push(blankItem(autoPrice));
       renderRows();
     }
   });
@@ -429,7 +477,7 @@ function mountItems(root, initialItems, { getRate, refInfo } = {}) {
   renderRows();
   return {
     get items() { return items; },
-    setItems(next) { items = next.length ? next : [blankItem()]; renderRows(); },
+    setItems(next) { items = next.length ? next : [blankItem(autoPrice)]; renderRows(); },
     refresh: renderRows,
     updateTotals,
   };
@@ -439,7 +487,7 @@ function itemsReadonlyHTML(doc, { progress } = {}) {
   const t = calc(doc);
   const dmap = progress ? deliveredMap(doc.id) : null;
   return `<div class="table-wrap"><table class="list">
-    <thead><tr><th>No.</th><th>品名</th><th>仕様・型番</th><th class="num">数量</th><th>単位</th><th class="num">単価</th><th class="num">金額</th>
+    <thead><tr><th>No.</th><th>品名</th><th>色</th><th class="num">数量</th><th>単位</th><th class="num">単価</th><th class="num">金額</th>
       ${progress ? '<th class="num">納品済</th><th class="num">残</th><th></th>' : ''}</tr></thead>
     <tbody>${doc.items.map((it, i) => {
       const done = dmap ? dmap[it.id] || 0 : 0;
@@ -586,7 +634,7 @@ function viewOrderForm(id) {
   if (id && !editing) return notFound();
   const o = editing ? clone(editing) : {
     id: uid(), orderNo: nextNo('order'), customerPoNo: '', customerId: '', orderDate: today(), dueDate: '',
-    subject: '', taxRate: db.settings.taxRate, items: [blankItem()], note: '',
+    subject: '', taxRate: db.settings.taxRate, items: [blankItem(true)], note: '',
   };
 
   render(`
@@ -634,7 +682,7 @@ function viewOrderForm(id) {
     </form>`);
 
   const form = $('#doc-form');
-  const ed = mountItems($('#items'), o.items, { getRate: () => form.elements.taxRate.value });
+  const ed = mountItems($('#items'), o.items, { getRate: () => form.elements.taxRate.value, autoPrice: true });
   form.elements.taxRate.addEventListener('input', ed.updateTotals);
   bindPartnerButtons(form);
 
@@ -647,6 +695,7 @@ function viewOrderForm(id) {
     if (!f.customerId) return toast('お客様を選択してください', 'error');
     const items = cleanItems(ed.items);
     if (!items.length) return toast('明細を1行以上入力してください（品名は必須です）', 'error');
+    if (itemsError(items)) return toast(itemsError(items), 'error');
     Object.assign(o, {
       orderNo: f.orderNo, customerPoNo: f.customerPoNo.trim(), customerId: f.customerId, orderDate: f.orderDate,
       dueDate: f.dueDate, subject: f.subject.trim(), taxRate: toNum(f.taxRate), items, note: f.note,
@@ -808,10 +857,10 @@ function docHTML(type, d) {
   const MIN_ROWS = 10;
   const rows = d.items.map((it, i) => `<tr>
       <td class="c">${i + 1}</td>
-      <td>${esc(it.name)}${it.spec ? `<span class="spec">${esc(it.spec)}</span>` : ''}</td>
+      <td>${esc(it.name)}</td><td class="c">${esc(it.spec)}</td>
       <td class="r">${num(it.qty)}</td><td class="c">${esc(it.unit)}</td>
       <td class="r">${it.price === '' ? '' : num(it.price)}</td><td class="r">${num(lineAmount(it))}</td></tr>`);
-  for (let i = rows.length; i < MIN_ROWS; i++) rows.push('<tr><td></td><td></td><td></td><td></td><td></td><td></td></tr>');
+  for (let i = rows.length; i < MIN_ROWS; i++) rows.push('<tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>');
 
   return `
     <h1 class="doc-title">${isPo ? '発注書' : '納品書'}</h1>
@@ -842,7 +891,7 @@ function docHTML(type, d) {
       </div>
     </div>
     <table class="doc-lines">
-      <thead><tr><th style="width:9mm">No.</th><th>品名・仕様</th><th style="width:18mm">数量</th><th style="width:14mm">単位</th>
+      <thead><tr><th style="width:9mm">No.</th><th>品名</th><th style="width:30mm">色</th><th style="width:18mm">数量</th><th style="width:14mm">単位</th>
         <th style="width:24mm">単価</th><th style="width:28mm">金額</th></tr></thead>
       <tbody>${rows.join('')}</tbody>
     </table>
@@ -958,6 +1007,7 @@ function viewPoForm(id, orderIdParam) {
     if (!f.supplierId) return toast('仕入先を選択してください', 'error');
     const items = cleanItems(ed.items);
     if (!items.length) return toast('明細を1行以上入力してください（品名は必須です）', 'error');
+    if (itemsError(items)) return toast(itemsError(items), 'error');
     if (items.some(it => it.price === '') && !confirm('単価が未入力の行があります。このまま保存しますか？')) return;
     Object.assign(p, {
       poNo: f.poNo, orderId: f.orderId, supplierId: f.supplierId, poDate: f.poDate, dueDate: f.dueDate,
@@ -987,7 +1037,7 @@ function viewDnForm(id, orderIdParam) {
     items: src ? remainingItems(src) : [], note: '',
   };
   const allDelivered = !editing && src && !d.items.length;
-  if (!d.items.length) d.items = [blankItem()];
+  if (!d.items.length) d.items = [blankItem(true)];
 
   render(`
     <div class="page-head">
@@ -1044,7 +1094,7 @@ function viewDnForm(id, orderIdParam) {
     const over = toNum(it.qty) > rest;
     return `受注数 ${num(line.qty)} ／ 納品済 ${num(done)} ／ 残 ${num(rest)}${over ? '　<span class="over">⚠ 残数を超えています</span>' : ''}`;
   };
-  const ed = mountItems($('#items'), d.items, { getRate: () => form.elements.taxRate.value, refInfo });
+  const ed = mountItems($('#items'), d.items, { getRate: () => form.elements.taxRate.value, refInfo, autoPrice: true });
   form.elements.taxRate.addEventListener('input', ed.updateTotals);
 
   let lastOrderId = form.elements.orderId.value;
@@ -1073,6 +1123,7 @@ function viewDnForm(id, orderIdParam) {
     if (!f.orderId) return toast('紐付ける受注を選択してください', 'error');
     const items = cleanItems(ed.items);
     if (!items.length) return toast('明細を1行以上入力してください（品名は必須です）', 'error');
+    if (itemsError(items)) return toast(itemsError(items), 'error');
     const o = getOrder(f.orderId);
     const dmap = deliveredMap(o.id, d.id);
     const over = items.some(it => {
@@ -1155,6 +1206,111 @@ function viewPartners() {
     toast('取引先を削除しました');
     viewPartners();
   }));
+}
+
+// ---------- 商品・色マスタ ----------
+function viewMasters() {
+  const allItems = () => [...db.orders, ...db.pos, ...db.deliveries].flatMap(d => d.items);
+  const usedName = name => allItems().some(it => it.name === name);
+  const usedColor = c => allItems().some(it => it.spec === c);
+  render(`
+    <div class="page-head"><h1>商品・色マスタ</h1></div>
+    <p class="hint" style="margin:-8px 0 14px">ここに登録した商品と色が、受注・発注書・納品書の明細でプルダウンから選べるようになります。</p>
+    <section class="card">
+      <h2>色</h2>
+      <div class="chips">${db.colors.map((c, i) => `<span class="chip">
+          <button type="button" class="chip-move" data-move="${i}" data-dir="-1" title="前へ" ${i === 0 ? 'disabled' : ''}>‹</button>
+          ${esc(c)}
+          <button type="button" class="chip-move" data-move="${i}" data-dir="1" title="後ろへ" ${i === db.colors.length - 1 ? 'disabled' : ''}>›</button>
+          <button type="button" class="chip-del" data-del-color="${i}" title="削除">✕</button></span>`).join('') || '<span class="muted">色がありません</span>'}</div>
+      <form class="with-btn" id="color-form" style="max-width:420px;margin-top:14px" autocomplete="off">
+        <input name="color" placeholder="追加する色（例：シルバー）">
+        <button class="btn btn-primary" type="submit">＋ 色を追加</button>
+      </form>
+      <p class="hint">‹ › で並び順（プルダウンの表示順）を変えられます。</p>
+    </section>
+    <section class="card">
+      <h2>商品</h2>
+      <div class="table-wrap"><table class="list">
+        <thead><tr><th>品名</th><th>単位</th><th class="num">標準単価（税抜）</th><th>色を選ぶ</th><th></th></tr></thead>
+        <tbody>${db.products.map(p => `<tr data-id="${p.id}">
+          <td><input data-f="name" value="${esc(p.name)}" placeholder="品名"></td>
+          <td style="width:110px"><input data-f="unit" value="${esc(p.unit)}" list="units"></td>
+          <td style="width:160px"><input data-f="price" type="number" step="any" class="num" value="${esc(p.price)}"></td>
+          <td style="width:110px"><label><input data-f="useColor" type="checkbox" ${p.useColor ? 'checked' : ''} style="width:auto"> 選ぶ</label></td>
+          <td style="width:80px"><button type="button" class="btn btn-sm btn-danger" data-del-product="${p.id}">削除</button></td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+      <p class="hint">先頭の商品が、新しい明細行で最初から選ばれます。標準単価は受注・納品書の明細に自動で入ります（発注書は仕入単価を入力するため入りません）。</p>
+      <div class="actions" style="margin-top:12px">
+        <button type="button" class="btn btn-ghost" data-act="add-product">＋ 商品を追加</button>
+        <button type="button" class="btn btn-primary" data-act="save-products">商品を保存する</button>
+      </div>
+    </section>`);
+
+  const readProducts = () => $$('tr[data-id]').map(tr => ({
+    id: tr.dataset.id,
+    name: $('[data-f=name]', tr).value.trim(),
+    unit: $('[data-f=unit]', tr).value.trim(),
+    price: toNum($('[data-f=price]', tr).value),
+    useColor: $('[data-f=useColor]', tr).checked,
+  }));
+
+  $('#color-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const c = e.target.elements.color.value.trim();
+    if (!c) return;
+    if (db.colors.includes(c)) return toast('その色は既に登録されています', 'error');
+    db.colors.push(c);
+    save();
+    toast(`色「${c}」を追加しました`);
+    viewMasters();
+    $('#color-form').elements.color.focus();
+  });
+  $$('[data-move]').forEach(b => b.addEventListener('click', () => {
+    const i = +b.dataset.move;
+    const j = i + +b.dataset.dir;
+    [db.colors[i], db.colors[j]] = [db.colors[j], db.colors[i]];
+    save();
+    viewMasters();
+  }));
+  $$('[data-del-color]').forEach(b => b.addEventListener('click', () => {
+    const i = +b.dataset.delColor;
+    const c = db.colors[i];
+    const msg = usedColor(c)
+      ? `色「${c}」は登録済みの書類で使われています（書類の内容はそのまま残ります）。\n選択肢から削除しますか？`
+      : `色「${c}」を削除しますか？`;
+    if (!confirm(msg)) return;
+    db.colors.splice(i, 1);
+    save();
+    toast('色を削除しました');
+    viewMasters();
+  }));
+  $('[data-act=add-product]').addEventListener('click', () => {
+    db.products = readProducts();
+    db.products.push({ id: uid(), name: '', unit: '個', price: 0, useColor: false });
+    viewMasters();
+    $$('tr[data-id] [data-f=name]').pop().focus();
+  });
+  $$('[data-del-product]').forEach(b => b.addEventListener('click', () => {
+    const list = readProducts();
+    const p = list.find(x => x.id === b.dataset.delProduct);
+    if (list.length <= 1) return toast('商品は1件以上必要です', 'error');
+    if (p.name && usedName(p.name) && !confirm(`「${p.name}」は登録済みの書類で使われています（書類の内容はそのまま残ります）。\n選択肢から削除しますか？`)) return;
+    db.products = list.filter(x => x.id !== p.id);
+    save();
+    toast('商品を削除しました');
+    viewMasters();
+  }));
+  $('[data-act=save-products]').addEventListener('click', () => {
+    const list = readProducts();
+    if (list.some(p => !p.name)) return toast('品名が空の商品があります', 'error');
+    if (new Set(list.map(p => p.name)).size !== list.length) return toast('同じ品名の商品が重複しています', 'error');
+    db.products = list;
+    save();
+    toast('商品を保存しました');
+    viewMasters();
+  });
 }
 
 // ---------- 設定 ----------
@@ -1286,7 +1442,7 @@ function loadSample() {
   const sup1 = P('ガンマ製作所株式会社', 'supplier', '営業課 高橋様', '群馬県高崎市八島町1-1');
   P('デルタ梱包資材株式会社', 'supplier', '', '埼玉県熊谷市筑波1-1-1');
   const t = today();
-  const RQM = '「レスキューミー」自動車用緊急脱出・救出ツール';
+  const RQM = db.products[0]?.name || 'レスキューミー';
   const I = (name, spec, qty, unit, price) => ({ id: uid(), name, spec, qty, unit, price });
 
   const addOrder = o => { const rec = { id: uid(), orderNo: nextNo('order'), taxRate: 10, note: '', createdAt: new Date().toISOString(), ...o }; db.orders.push(rec); return rec; };
