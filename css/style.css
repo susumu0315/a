@@ -309,6 +309,8 @@ table.doc-meta th { background: #eef1f5; width: 28mm; text-align: left; font-wei
 table.doc-meta td { font-family: ui-monospace, Consolas, monospace; font-weight: 700; }
 .company { font-size: 9pt; }
 .company-name { font-size: 11.5pt; font-weight: 700; }
+.company-logo { height: 9mm; display: block; margin-bottom: 1mm; }
+.company-dept { font-weight: 700; }
 .stamps { display: flex; justify-content: flex-end; gap: 0; }
 .stamp { border: 1px solid #555; width: 19mm; text-align: center; font-size: 8pt; }
 .stamp + .stamp { border-left: none; }

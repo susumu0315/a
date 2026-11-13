@@ -54,11 +54,20 @@ function download(filename, content, mime) {
 }
 
 // ---------- data ----------
+// 自社情報の初期値（見積書雛形の差出人欄より）
+const COMPANY_DEFAULT = {
+  name: 'ミカド電子株式会社', dept: '防災事業部', zip: '366-0052', address: '埼玉県深谷市上柴町西1-21-13',
+  tel: '048-573-6200', fax: '', email: '', invoiceNo: '', person: '',
+};
+const SAMPLE_COMPANY_NAME = '株式会社サンプル商事';
+
 function defaultData() {
   return {
-    version: 1,
+    version: 2,
     settings: {
-      company: { name: '', zip: '', address: '', tel: '', fax: '', email: '', invoiceNo: '', person: '' },
+      company: { ...COMPANY_DEFAULT },
+      showLogo: true,
+      paymentTerms: '月末締め翌月末現金振込',
       taxRate: 10,
       prefix: { order: 'JO', po: 'PO', dn: 'DN' },
     },
@@ -72,13 +81,17 @@ function defaultData() {
 function normalize(d) {
   const def = defaultData();
   const s = d.settings || {};
+  let company = { ...def.settings.company, ...(s.company || {}) };
+  // 旧版で自社情報が未登録（またはサンプルのまま）なら初期値の自社情報に置き換える
+  if ((d.version || 1) < 2 && (!company.name || company.name === SAMPLE_COMPANY_NAME)) company = { ...COMPANY_DEFAULT };
   return {
     ...def,
     ...d,
+    version: def.version,
     settings: {
       ...def.settings,
       ...s,
-      company: { ...def.settings.company, ...(s.company || {}) },
+      company,
       prefix: { ...def.settings.prefix, ...(s.prefix || {}) },
     },
   };
@@ -802,7 +815,8 @@ function docHTML(type, d) {
       <div class="doc-from">
         <table class="doc-meta">${meta.map(([k, v]) => `<tr><th>${k}</th><td>${esc(v || '—')}</td></tr>`).join('')}</table>
         <div class="company">
-          <div class="company-name">${esc(c.name || '（自社名未設定：設定画面で登録）')}</div>
+          ${db.settings.showLogo ? `<img class="company-logo" src="img/logo.png" alt="${esc(c.name)}">` : `<div class="company-name">${esc(c.name || '（自社名未設定：設定画面で登録）')}</div>`}
+          ${c.dept ? `<div class="company-dept">${esc(c.dept)}</div>` : ''}
           ${c.zip || c.address ? `<div>${c.zip ? '〒' + esc(c.zip) + '　' : ''}${esc(c.address)}</div>` : ''}
           ${c.tel || c.fax ? `<div>${c.tel ? 'TEL ' + esc(c.tel) : ''}${c.fax ? '　FAX ' + esc(c.fax) : ''}</div>` : ''}
           ${c.email ? `<div>${esc(c.email)}</div>` : ''}
@@ -854,7 +868,7 @@ function viewPoForm(id, orderIdParam) {
   const src = orderIdParam ? getOrder(orderIdParam) : null;
   const p = editing ? clone(editing) : {
     id: uid(), poNo: nextNo('po'), orderId: src?.id || '', supplierId: '', poDate: today(),
-    dueDate: src?.dueDate ? addDays(src.dueDate, -2) : '', deliveryPlace: '', paymentTerms: '',
+    dueDate: src?.dueDate ? addDays(src.dueDate, -2) : '', deliveryPlace: '', paymentTerms: db.settings.paymentTerms || '',
     subject: src?.subject || '', taxRate: src?.taxRate ?? db.settings.taxRate,
     items: src ? poItemsFromOrder(src) : [blankItem()], note: '',
   };
@@ -1141,7 +1155,8 @@ function viewSettings() {
       <section class="card">
         <h2>自社情報 <span class="opt">（発注書・納品書の差出人として印字されます）</span></h2>
         <div class="grid-2">
-          <div class="field span-2"><label>会社名</label><input name="name" value="${esc(c.name)}" placeholder="例：株式会社〇〇"></div>
+          <div class="field"><label>会社名</label><input name="name" value="${esc(c.name)}" placeholder="例：株式会社〇〇"></div>
+          <div class="field"><label>部署名</label><input name="dept" value="${esc(c.dept)}" placeholder="例：防災事業部"></div>
           <div class="field"><label>郵便番号</label><input name="zip" value="${esc(c.zip)}"></div>
           <div class="field"><label>インボイス登録番号</label><input name="invoiceNo" value="${esc(c.invoiceNo)}" placeholder="例：T1234567890123"></div>
           <div class="field span-2"><label>住所</label><input name="address" value="${esc(c.address)}"></div>
@@ -1149,6 +1164,10 @@ function viewSettings() {
           <div class="field"><label>FAX</label><input name="fax" value="${esc(c.fax)}"></div>
           <div class="field"><label>メールアドレス</label><input name="email" value="${esc(c.email)}"></div>
           <div class="field"><label>担当者名</label><input name="person" value="${esc(c.person)}"></div>
+          <div class="field span-2">
+            <label><input type="checkbox" name="showLogo" ${s.showLogo ? 'checked' : ''} style="width:auto;margin-right:6px">会社ロゴを書類に印字する</label>
+            <img src="img/logo.png" alt="" style="height:32px;align-self:flex-start;margin-top:4px">
+          </div>
         </div>
       </section>
       <section class="card">
@@ -1158,6 +1177,7 @@ function viewSettings() {
           <div class="field"><label>発注No.の頭文字</label><input name="p_po" value="${esc(s.prefix.po)}"></div>
           <div class="field"><label>納品書No.の頭文字</label><input name="p_dn" value="${esc(s.prefix.dn)}"></div>
           <div class="field"><label>標準の消費税率（%）</label><input type="number" name="taxRate" value="${esc(s.taxRate)}" min="0" step="any" class="num"></div>
+          <div class="field span-2"><label>発注書の標準の支払条件</label><input name="paymentTerms" value="${esc(s.paymentTerms)}"></div>
         </div>
         <p class="hint">番号は「頭文字-西暦-連番」の形で自動採番されます（例：${esc(s.prefix.order)}-${new Date().getFullYear()}-0001）。</p>
       </section>
@@ -1180,7 +1200,9 @@ function viewSettings() {
     const f = Object.fromEntries(new FormData(e.target));
     const prefixes = [f.p_order, f.p_po, f.p_dn].map(v => v.trim());
     if (prefixes.some(v => !/^[A-Za-z0-9]+$/.test(v))) return toast('番号の頭文字は半角英数字で入力してください', 'error');
-    s.company = { name: f.name, zip: f.zip, address: f.address, tel: f.tel, fax: f.fax, email: f.email, invoiceNo: f.invoiceNo, person: f.person };
+    s.company = { name: f.name, dept: f.dept, zip: f.zip, address: f.address, tel: f.tel, fax: f.fax, email: f.email, invoiceNo: f.invoiceNo, person: f.person };
+    s.showLogo = f.showLogo === 'on';
+    s.paymentTerms = f.paymentTerms.trim();
     s.prefix = { order: prefixes[0], po: prefixes[1], dn: prefixes[2] };
     s.taxRate = toNum(f.taxRate);
     save();
@@ -1242,26 +1264,23 @@ function exportCsv() {
 // ---------- サンプルデータ ----------
 function loadSample() {
   if (db.orders.length && !confirm('今のデータにサンプルデータを追加します。よろしいですか？')) return;
-  const c = db.settings.company;
-  if (!c.name) {
-    Object.assign(c, { name: '株式会社サンプル商事', zip: '100-0005', address: '東京都千代田区丸の内1-1-1', tel: '03-1234-5678', fax: '03-1234-5679', invoiceNo: 'T1234567890123', person: '営業部 佐藤' });
-  }
   const P = (name, kind, contact, address) => {
     const p = { id: uid(), name, kind, honorific: '御中', zip: '', address, tel: '', contact };
     db.partners.push(p);
     return p;
   };
-  const cust1 = P('株式会社アルファ工業', 'customer', '購買部 田中様', '神奈川県横浜市西区みなとみらい2-2-1');
-  const cust2 = P('ベータ建設株式会社', 'customer', '工事部 鈴木様', '埼玉県さいたま市大宮区桜木町1-7-5');
-  const sup1 = P('ガンマ電機株式会社', 'supplier', '営業課 高橋様', '大阪府大阪市北区梅田3-1-1');
-  P('デルタ部品販売株式会社', 'supplier', '', '愛知県名古屋市中村区名駅1-1-4');
+  const cust1 = P('株式会社アルファ商事', 'customer', '購買部 田中様', '神奈川県横浜市西区みなとみらい2-2-1');
+  const cust2 = P('ベータ防災株式会社', 'customer', '営業部 鈴木様', '埼玉県さいたま市大宮区桜木町1-7-5');
+  const sup1 = P('ガンマ製作所株式会社', 'supplier', '営業課 高橋様', '群馬県高崎市八島町1-1');
+  P('デルタ梱包資材株式会社', 'supplier', '', '埼玉県熊谷市筑波1-1-1');
   const t = today();
+  const RQM = '「レスキューミー」自動車用緊急脱出・救出ツール';
   const I = (name, spec, qty, unit, price) => ({ id: uid(), name, spec, qty, unit, price });
 
   const addOrder = o => { const rec = { id: uid(), orderNo: nextNo('order'), taxRate: 10, note: '', createdAt: new Date().toISOString(), ...o }; db.orders.push(rec); return rec; };
   const addPo = (o, supplier, priceRate, extra = {}) => {
     const p = { id: uid(), poNo: nextNo('po'), orderId: o.id, supplierId: supplier.id, poDate: o.orderDate, dueDate: addDays(o.dueDate, -2),
-      deliveryPlace: '当社倉庫', paymentTerms: '月末締め翌月末払い', subject: o.subject, taxRate: 10, note: '',
+      deliveryPlace: '当社倉庫', paymentTerms: db.settings.paymentTerms, subject: o.subject, taxRate: 10, note: '',
       items: o.items.map(it => ({ id: uid(), ref: it.id, name: it.name, spec: it.spec, qty: it.qty, unit: it.unit, price: Math.round(it.price * priceRate) })), ...extra };
     db.pos.push(p);
     return p;
@@ -1273,18 +1292,18 @@ function loadSample() {
     return d;
   };
 
-  const o1 = addOrder({ customerPoNo: 'AL-24-0815', customerId: cust1.id, orderDate: addDays(t, -20), dueDate: addDays(t, -5), subject: '制御盤用部品一式',
-    items: [I('電磁開閉器', 'MC-18b AC200V', 4, '個', 6800), I('サーキットブレーカー', 'NF63-CV 3P 30A', 6, '個', 9200), I('端子台', 'TB-20 20P', 10, '個', 1450)] });
-  addPo(o1, sup1, 0.75);
+  const o1 = addOrder({ customerPoNo: 'AL-26-0815', customerId: cust1.id, orderDate: addDays(t, -20), dueDate: addDays(t, -5), subject: '社用車配備用 防災用品',
+    items: [I(RQM, 'オレンジ', 50, '個', 1250), I(RQM, 'ブラック', 50, '個', 1250)] });
+  addPo(o1, sup1, 0.6);
   addDn(o1, addDays(t, -6), it => it.qty);
 
-  const o2 = addOrder({ customerPoNo: 'B-PO-5521', customerId: cust2.id, orderDate: addDays(t, -10), dueDate: addDays(t, 3), subject: '〇〇ビル改修工事 照明器具',
-    items: [I('LEDベースライト', '40形 4000lm 昼白色', 30, '台', 12800), I('LEDダウンライト', 'φ100 電球色', 50, '台', 4300), I('取付工事費', '', 1, '式', 85000)] });
-  addPo(o2, sup1, 0.7);
-  addDn(o2, addDays(t, -2), it => (it.unit === '式' ? 0 : Math.floor(it.qty / 2)));
+  const o2 = addOrder({ customerPoNo: 'B-PO-5521', customerId: cust2.id, orderDate: addDays(t, -10), dueDate: addDays(t, 3), subject: '販売店向け 防災用品',
+    items: [I(RQM, 'イエロー', 100, '個', 1250), I(RQM, 'レッド', 100, '個', 1250), I(RQM, 'ブルー', 50, '個', 1250)] });
+  addPo(o2, sup1, 0.6);
+  addDn(o2, addDays(t, -2), it => Math.floor(it.qty / 2));
 
-  addOrder({ customerPoNo: '', customerId: cust1.id, orderDate: addDays(t, -1), dueDate: addDays(t, 14), subject: '保守用予備品',
-    items: [I('リレー', 'MY2N DC24V', 20, '個', 980), I('リレーソケット', 'PYF08A', 20, '個', 560)] });
+  addOrder({ customerPoNo: '', customerId: cust1.id, orderDate: addDays(t, -1), dueDate: addDays(t, 14), subject: '追加注文',
+    items: [I(RQM, 'ピンク', 20, '個', 1250), I(RQM, 'ホワイト', 20, '個', 1250)] });
   save();
   toast('サンプルデータを追加しました');
   if (location.hash === '#/orders') route();
