@@ -61,9 +61,15 @@ const COMPANY_DEFAULT = {
 };
 const SAMPLE_COMPANY_NAME = '株式会社サンプル商事';
 
+// 取引先の初期値（見積書雛形・防災品受注管理表より）
+const PARTNERS_DEFAULT = [
+  '株式会社ボウエキ', '株式会社ジーエム', '相日防災株式会社', '株式会社三和製作所',
+  '株式会社ライズ', '久下小学校', 'くらし企画', 'SIAソリューション',
+].map(name => ({ name, kind: 'customer', honorific: '御中', zip: '', address: '', tel: '', contact: '' }));
+
 function defaultData() {
   return {
-    version: 2,
+    version: 3,
     settings: {
       company: { ...COMPANY_DEFAULT },
       showLogo: true,
@@ -71,7 +77,7 @@ function defaultData() {
       taxRate: 10,
       prefix: { order: 'JO', po: 'PO', dn: 'DN' },
     },
-    partners: [],
+    partners: PARTNERS_DEFAULT.map(p => ({ id: uid(), ...p })),
     orders: [],
     pos: [],
     deliveries: [],
@@ -84,9 +90,15 @@ function normalize(d) {
   let company = { ...def.settings.company, ...(s.company || {}) };
   // 旧版で自社情報が未登録（またはサンプルのまま）なら初期値の自社情報に置き換える
   if ((d.version || 1) < 2 && (!company.name || company.name === SAMPLE_COMPANY_NAME)) company = { ...COMPANY_DEFAULT };
+  // 旧版のデータには、まだ登録されていない初期の取引先だけを追加する
+  const partners = d.partners || [];
+  if ((d.version || 1) < 3) {
+    PARTNERS_DEFAULT.forEach(p => { if (!partners.some(x => x.name === p.name)) partners.push({ id: uid(), ...p }); });
+  }
   return {
     ...def,
     ...d,
+    partners,
     version: def.version,
     settings: {
       ...def.settings,
