@@ -244,11 +244,11 @@ function remainingItems(order, excludeDnId) {
 const routes = [
   [/^\/$/, viewDashboard],
   [/^\/orders$/, (m, q) => viewOrderList(q)],
-  [/^\/orders\/new$/, () => viewOrderForm(null)],
+  [/^\/orders\/new$/, (m, q) => viewOrderForm(null, q.get('customer'))],
   [/^\/orders\/([^/]+)\/edit$/, m => viewOrderForm(m[1])],
   [/^\/orders\/([^/]+)$/, m => viewOrderDetail(m[1])],
   [/^\/pos$/, () => viewDocList('po')],
-  [/^\/pos\/new$/, (m, q) => viewPoForm(null, q.get('order'))],
+  [/^\/pos\/new$/, (m, q) => viewPoForm(null, q.get('order'), q.get('supplier'))],
   [/^\/pos\/([^/]+)\/edit$/, m => viewPoForm(m[1])],
   [/^\/pos\/([^/]+)$/, m => viewDocDetail('po', m[1])],
   [/^\/deliveries$/, () => viewDocList('dn')],
@@ -256,6 +256,7 @@ const routes = [
   [/^\/deliveries\/([^/]+)\/edit$/, m => viewDnForm(m[1])],
   [/^\/deliveries\/([^/]+)$/, m => viewDocDetail('dn', m[1])],
   [/^\/partners$/, viewPartners],
+  [/^\/partners\/([^/]+)$/, m => viewPartnerDetail(m[1])],
   [/^\/masters$/, viewMasters],
   [/^\/settings$/, viewSettings],
   [/^\/search$/, (m, q) => viewSearch(q.get('q') || '')],
@@ -289,12 +290,21 @@ function notFound() {
 
 // ---------- shared UI ----------
 function partnerOptions(kind, selected) {
-  const list = db.partners
-    .filter(p => p.kind === kind || p.kind === 'both' || p.id === selected)
-    .sort(byField('name'));
+  const main = [];
+  const other = [];
+  [...db.partners].sort(byField('name')).forEach(p => (p.kind === kind || p.kind === 'both' ? main : other).push(p));
+  const opts = list => list.map(p => `<option value="${p.id}" ${p.id === selected ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
   return `<option value="">— 選択してください —</option>` +
-    list.map(p => `<option value="${p.id}" ${p.id === selected ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
+    (other.length ? `<optgroup label="${KIND_LABEL[kind]}">${opts(main)}</optgroup><optgroup label="その他の取引先">${opts(other)}</optgroup>` : opts(main));
 }
+
+// 顧客として登録した取引先を仕入先に使った（またはその逆）場合は「両方」に切り替える
+function linkPartnerKind(id, kind) {
+  const p = getPartner(id);
+  if (p && p.kind !== kind && p.kind !== 'both') p.kind = 'both';
+}
+
+const partnerLink = id => (getPartner(id) ? `<a href="#/partners/${id}">${esc(partnerName(id))}</a>` : esc(partnerName(id)));
 
 function orderOptions(selected, emptyLabel) {
   const list = [...db.orders].sort(byDateNoDesc('orderDate', 'orderNo'));
@@ -597,7 +607,7 @@ function orderTableHTML(orders) {
       const search = [o.orderNo, o.customerPoNo, partnerName(o.customerId), o.subject, ...pos.map(p => p.poNo), ...dns.map(d => d.dnNo)].join(' ');
       return `<tr class="clickable" data-href="#/orders/${o.id}" data-search="${esc(search)}" data-status="${st.key}">
         <td>${tag(o.orderNo, 'is-order')}</td><td>${tag(o.customerPoNo, 'is-cust')}</td><td class="nowrap">${esc(o.orderDate)}</td>
-        <td class="wide">${esc(partnerName(o.customerId))}</td><td class="wide">${esc(o.subject)}</td><td class="nowrap">${dueHTML(o, st)}</td>
+        <td class="wide">${partnerLink(o.customerId)}</td><td class="wide">${esc(o.subject)}</td><td class="nowrap">${dueHTML(o, st)}</td>
         <td class="num">${yen(calc(o).total)}</td>
         <td>${pos.map(p => `<a href="#/pos/${p.id}">${tag(p.poNo, 'is-po')}</a>`).join(' ') || '<span class="muted">—</span>'}</td>
         <td>${dns.map(d => `<a href="#/deliveries/${d.id}">${tag(d.dnNo, 'is-dn')}</a>`).join(' ') || '<span class="muted">—</span>'}</td>
@@ -629,11 +639,11 @@ function viewOrderList(q) {
   bindListFilter($('#view'));
 }
 
-function viewOrderForm(id) {
+function viewOrderForm(id, customerParam) {
   const editing = id ? getOrder(id) : null;
   if (id && !editing) return notFound();
   const o = editing ? clone(editing) : {
-    id: uid(), orderNo: nextNo('order'), customerPoNo: '', customerId: '', orderDate: today(), dueDate: '',
+    id: uid(), orderNo: nextNo('order'), customerPoNo: '', customerId: getPartner(customerParam) ? customerParam : '', orderDate: today(), dueDate: '',
     subject: '', taxRate: db.settings.taxRate, items: [blankItem(true)], note: '',
   };
 
@@ -701,6 +711,7 @@ function viewOrderForm(id) {
       dueDate: f.dueDate, subject: f.subject.trim(), taxRate: toNum(f.taxRate), items, note: f.note,
       updatedAt: new Date().toISOString(),
     });
+    linkPartnerKind(o.customerId, 'customer');
     if (editing) db.orders[db.orders.indexOf(editing)] = o;
     else db.orders.push({ ...o, createdAt: o.updatedAt });
     save();
@@ -744,7 +755,7 @@ function viewOrderDetail(id) {
         <div><dt>お客様発注No.</dt><dd>${tag(o.customerPoNo, 'is-cust')}</dd></div>
         <div><dt>受注日</dt><dd>${fmtDate(o.orderDate) || '—'}</dd></div>
         <div><dt>納期</dt><dd>${dueHTML(o, st)}</dd></div>
-        <div class="span-2"><dt>お客様</dt><dd>${esc(cu?.name || '（未設定）')} ${cu?.contact ? `<span class="muted">／${esc(cu.contact)}</span>` : ''}</dd></div>
+        <div class="span-2"><dt>お客様</dt><dd>${partnerLink(o.customerId)} ${cu?.contact ? `<span class="muted">／${esc(cu.contact)}</span>` : ''}</dd></div>
         <div class="span-2"><dt>件名</dt><dd>${esc(o.subject) || '—'}</dd></div>
       </dl>
       ${itemsReadonlyHTML(o, { progress: true })}
@@ -768,10 +779,29 @@ const DOC = {
   dn: { label: '納品書', path: 'deliveries', noField: 'dnNo', dateField: 'deliveryDate', cls: 'is-dn', step: '③', list: () => db.deliveries },
 };
 
+function docTableHTML(type, docs) {
+  const T = DOC[type];
+  const isPo = type === 'po';
+  return `<div class="table-wrap"><table class="list">
+        <thead><tr><th>${T.label}No.</th><th>${isPo ? '発注日' : '納品日'}</th><th>${isPo ? '仕入先' : 'お客様'}</th>
+          <th>自社受注No.</th><th>お客様発注No.</th><th>件名</th>${isPo ? '<th>納期</th>' : ''}<th class="num">金額（税込）</th><th></th></tr></thead>
+        <tbody>${docs.map(d => {
+          const o = d.orderId ? getOrder(d.orderId) : null;
+          const pid = isPo ? d.supplierId : o?.customerId;
+          const search = [d[T.noField], partnerName(pid), o?.orderNo, o?.customerPoNo, d.subject].join(' ');
+          return `<tr class="clickable" data-href="#/${T.path}/${d.id}" data-search="${esc(search)}">
+            <td>${tag(d[T.noField], T.cls)}</td><td class="nowrap">${esc(d[T.dateField])}</td><td class="wide">${partnerLink(pid)}</td>
+            <td>${o ? `<a href="#/orders/${o.id}">${tag(o.orderNo, 'is-order')}</a>` : '<span class="muted">紐付けなし</span>'}</td>
+            <td>${tag(o?.customerPoNo, 'is-cust')}</td><td>${esc(d.subject)}</td>
+            ${isPo ? `<td class="nowrap">${esc(d.dueDate) || '—'}</td>` : ''}
+            <td class="num">${yen(calc(d).total)}</td>
+            <td><a class="btn btn-sm" href="#/${T.path}/${d.id}">表示・印刷</a></td></tr>`;
+        }).join('')}</tbody></table></div>`;
+}
+
 function viewDocList(type) {
   const T = DOC[type];
   const docs = [...T.list()].sort(byDateNoDesc(T.dateField, T.noField));
-  const isPo = type === 'po';
   render(`
     <div class="page-head">
       <div><div class="crumb">ステップ ${T.step}</div><h1>${T.label}一覧</h1></div>
@@ -781,21 +811,7 @@ function viewDocList(type) {
     <section class="card">
       ${docs.length ? `
       <div class="filters"><input type="search" data-filter placeholder="番号・会社名・件名で絞り込み"><span class="muted" data-count></span></div>
-      <div class="table-wrap"><table class="list">
-        <thead><tr><th>${T.label}No.</th><th>${isPo ? '発注日' : '納品日'}</th><th>${isPo ? '仕入先' : 'お客様'}</th>
-          <th>自社受注No.</th><th>お客様発注No.</th><th>件名</th>${isPo ? '<th>納期</th>' : ''}<th class="num">金額（税込）</th><th></th></tr></thead>
-        <tbody>${docs.map(d => {
-          const o = d.orderId ? getOrder(d.orderId) : null;
-          const to = isPo ? partnerName(d.supplierId) : partnerName(o?.customerId);
-          const search = [d[T.noField], to, o?.orderNo, o?.customerPoNo, d.subject].join(' ');
-          return `<tr class="clickable" data-href="#/${T.path}/${d.id}" data-search="${esc(search)}">
-            <td>${tag(d[T.noField], T.cls)}</td><td class="nowrap">${esc(d[T.dateField])}</td><td class="wide">${esc(to)}</td>
-            <td>${o ? `<a href="#/orders/${o.id}">${tag(o.orderNo, 'is-order')}</a>` : '<span class="muted">紐付けなし</span>'}</td>
-            <td>${tag(o?.customerPoNo, 'is-cust')}</td><td>${esc(d.subject)}</td>
-            ${isPo ? `<td class="nowrap">${esc(d.dueDate) || '—'}</td>` : ''}
-            <td class="num">${yen(calc(d).total)}</td>
-            <td><a class="btn btn-sm" href="#/${T.path}/${d.id}">表示・印刷</a></td></tr>`;
-        }).join('')}</tbody></table></div>` :
+      ${docTableHTML(type, docs)}` :
         `<div class="empty">${T.label}はまだありません。<br>受注一覧から受注を開き「${T.label}を作る」を押すと、番号・明細が紐付いた${T.label}を作成できます。<br>
           <a class="btn" href="#/orders">受注一覧を開く</a></div>`}
     </section>`);
@@ -822,6 +838,11 @@ function viewDocDetail(type, id) {
     <section class="card no-print">
       <h2>紐付け</h2>
       ${o ? chainHTML(o, { currentId: d.id, withAdd: false }) : '<p class="muted">この発注書は受注に紐付いていません。編集画面で自社受注No.を選ぶと紐付けできます。</p>'}
+      ${(() => {
+        const pid = type === 'po' ? d.supplierId : o?.customerId;
+        return getPartner(pid) ? `<div class="link-info"><span>宛先（${type === 'po' ? '仕入先' : 'お客様'}）：<b>${partnerLink(pid)}</b></span>
+          <span class="muted">取引先の住所・ご担当者などを変更すると、この書類にもすぐ反映されます。</span></div>` : '';
+      })()}
       <p class="hint">「PDFで印刷・保存」→ 印刷画面の送信先（プリンター）で <b>「PDFに保存」</b> を選ぶと PDF ファイルになります。ファイル名は「${T.label}_${esc(no)}」になります。</p>
     </section>
     <div class="paper-scroll"><div class="paper">${docHTML(type, d)}</div></div>`);
@@ -923,12 +944,12 @@ function linkInfoHTML(o) {
     <span>お客様：<b>${esc(partnerName(o.customerId))}</b></span><span>納期：<b>${esc(o.dueDate || '—')}</b></span>`;
 }
 
-function viewPoForm(id, orderIdParam) {
+function viewPoForm(id, orderIdParam, supplierParam) {
   const editing = id ? getPo(id) : null;
   if (id && !editing) return notFound();
   const src = orderIdParam ? getOrder(orderIdParam) : null;
   const p = editing ? clone(editing) : {
-    id: uid(), poNo: nextNo('po'), orderId: src?.id || '', supplierId: '', poDate: today(),
+    id: uid(), poNo: nextNo('po'), orderId: src?.id || '', supplierId: getPartner(supplierParam) ? supplierParam : '', poDate: today(),
     dueDate: src?.dueDate ? addDays(src.dueDate, -2) : '', deliveryPlace: '', paymentTerms: db.settings.paymentTerms || '',
     subject: src?.subject || '', taxRate: src?.taxRate ?? db.settings.taxRate,
     items: src ? poItemsFromOrder(src) : [blankItem()], note: '',
@@ -1014,6 +1035,7 @@ function viewPoForm(id, orderIdParam) {
       subject: f.subject.trim(), deliveryPlace: f.deliveryPlace.trim(), paymentTerms: f.paymentTerms.trim(),
       taxRate: toNum(f.taxRate), items, note: f.note, updatedAt: new Date().toISOString(),
     });
+    linkPartnerKind(p.supplierId, 'supplier');
     if (editing) db.pos[db.pos.indexOf(editing)] = p;
     else db.pos.push({ ...p, createdAt: p.updatedAt });
     save();
@@ -1160,11 +1182,14 @@ function viewSearch(query) {
     db.deliveries.forEach(d => { if (has(d.dnNo, d.subject) && getOrder(d.orderId)) orderIds.add(d.orderId); });
   }
   const orders = [...orderIds].map(getOrder).sort(byDateNoDesc('orderDate', 'orderNo'));
+  const partners = q ? db.partners.filter(p => has(p.name, p.address, p.contact, p.tel)) : [];
 
   render(`
     <div class="page-head"><h1>検索結果：「${esc(query)}」</h1></div>
     ${!q ? '<div class="card empty">検索したい番号や会社名を入力してください。</div>' : ''}
-    ${q && !orders.length && !loosePos.length ? '<div class="card empty">該当するデータはありません。</div>' : ''}
+    ${q && !orders.length && !loosePos.length && !partners.length ? '<div class="card empty">該当するデータはありません。</div>' : ''}
+    ${partners.length ? `<section class="card"><h2>取引先</h2><div class="actions">
+      ${partners.map(p => `<a class="btn" href="#/partners/${p.id}">${esc(p.name)}</a>`).join('')}</div></section>` : ''}
     ${orders.map(o => `<section class="card search-result">
       <h3>${tag(o.orderNo, 'is-order')} ${esc(partnerName(o.customerId))} ${o.subject ? '／' + esc(o.subject) : ''} ${badge(orderStatus(o))}</h3>
       ${chainHTML(o, { withAdd: false })}</section>`).join('')}
@@ -1175,21 +1200,26 @@ function viewSearch(query) {
 // ---------- 取引先 ----------
 function viewPartners() {
   const list = [...db.partners].sort(byField('name'));
-  const usage = p => db.orders.filter(o => o.customerId === p.id).length + db.pos.filter(x => x.supplierId === p.id).length;
+  const usage = p => partnerDocs(p.id).orders.length + partnerDocs(p.id).pos.length;
   render(`
     <div class="page-head"><h1>取引先</h1>
       <div class="actions"><button class="btn btn-primary" data-act="new">＋ 取引先を登録</button></div></div>
     <section class="card">
       ${list.length ? `
       <div class="filters"><input type="search" data-filter placeholder="会社名・住所で絞り込み"><span class="muted" data-count></span></div>
+      <p class="hint" style="margin:-6px 0 10px">行を押すと、その取引先に紐付く受注・発注書・納品書を確認できます。</p>
       <div class="table-wrap"><table class="list">
-        <thead><tr><th>会社名・氏名</th><th>区分</th><th>住所</th><th>電話</th><th>ご担当者</th><th class="num">取引件数</th><th></th></tr></thead>
-        <tbody>${list.map(p => `<tr data-search="${esc([p.name, p.address, p.contact, p.tel].join(' '))}">
+        <thead><tr><th>会社名・氏名</th><th>区分</th><th>住所</th><th>電話</th><th>ご担当者</th>
+          <th class="num">受注</th><th class="num">発注書</th><th class="num">納品書</th><th></th></tr></thead>
+        <tbody>${list.map(p => {
+          const docs = partnerDocs(p.id);
+          return `<tr class="clickable" data-href="#/partners/${p.id}" data-search="${esc([p.name, p.address, p.contact, p.tel].join(' '))}">
           <td><b>${esc(p.name)}</b> <span class="muted">${esc(p.honorific)}</span></td><td>${KIND_LABEL[p.kind] || ''}</td>
           <td>${p.zip ? '〒' + esc(p.zip) + ' ' : ''}${esc(p.address)}</td><td>${esc(p.tel)}</td><td>${esc(p.contact)}</td>
-          <td class="num">${usage(p)}</td>
+          <td class="num">${docs.orders.length}</td><td class="num">${docs.pos.length}</td><td class="num">${docs.dns.length}</td>
           <td><span class="actions"><button class="btn btn-sm" data-edit="${p.id}">編集</button><button class="btn btn-sm btn-danger" data-del="${p.id}">削除</button></span></td>
-        </tr>`).join('')}</tbody></table></div>` :
+        </tr>`;
+        }).join('')}</tbody></table></div>` :
         '<div class="empty">取引先はまだありません。受注・発注書の入力画面の「＋ 新規」からも登録できます。</div>'}
     </section>`);
   bindListFilter($('#view'));
@@ -1206,6 +1236,71 @@ function viewPartners() {
     toast('取引先を削除しました');
     viewPartners();
   }));
+}
+
+// 取引先に紐付く書類（お客様としての受注・納品書、仕入先としての発注書）
+function partnerDocs(id) {
+  const orders = db.orders.filter(o => o.customerId === id);
+  const orderIds = new Set(orders.map(o => o.id));
+  return {
+    orders: orders.sort(byDateNoDesc('orderDate', 'orderNo')),
+    pos: db.pos.filter(p => p.supplierId === id).sort(byDateNoDesc('poDate', 'poNo')),
+    dns: db.deliveries.filter(d => orderIds.has(d.orderId)).sort(byDateNoDesc('deliveryDate', 'dnNo')),
+  };
+}
+
+function viewPartnerDetail(id) {
+  const p = getPartner(id);
+  if (!p) return notFound();
+  const docs = partnerDocs(id);
+  const sum = list => yen(list.reduce((s, d) => s + calc(d).total, 0));
+  const open = docs.orders.filter(o => orderStatus(o).key !== 'done').length;
+
+  render(`
+    <div class="page-head">
+      <div><div class="crumb"><a href="#/partners">取引先</a> › 詳細</div>
+        <h1>${esc(p.name)} <span class="muted" style="font-size:1rem">${esc(p.honorific)}</span>
+          <span class="badge st-po">${KIND_LABEL[p.kind] || ''}</span></h1></div>
+      <div class="actions">
+        <a class="btn btn-primary" href="#/orders/new?customer=${p.id}">＋ この取引先の受注を登録</a>
+        <a class="btn" href="#/pos/new?supplier=${p.id}">＋ この取引先へ発注書を作成</a>
+        <button class="btn" data-act="edit">✎ 取引先情報を編集</button>
+      </div>
+    </div>
+    <section class="card">
+      <h2>取引先情報</h2>
+      <dl class="info">
+        <div class="span-2"><dt>住所</dt><dd>${p.zip ? '〒' + esc(p.zip) + '　' : ''}${esc(p.address) || '<span class="muted">未登録</span>'}</dd></div>
+        <div><dt>電話番号</dt><dd>${esc(p.tel) || '<span class="muted">未登録</span>'}</dd></div>
+        <div><dt>ご担当者</dt><dd>${esc(p.contact) || '<span class="muted">未登録</span>'}</dd></div>
+      </dl>
+      <p class="hint">ここで変更した内容は、この取引先あての発注書・納品書（作成済みのものも含む）に反映されます。</p>
+    </section>
+    <div class="tiles">
+      <div class="tile"><div class="tile-label">受注</div><div class="tile-value">${docs.orders.length} 件</div><div class="tile-sub">${sum(docs.orders)}（税込）</div></div>
+      <div class="tile ${open ? 'is-alert' : ''}"><div class="tile-label">未納品の受注</div><div class="tile-value">${open} 件</div><div class="tile-sub">納品が完了していない受注</div></div>
+      <div class="tile"><div class="tile-label">納品書</div><div class="tile-value">${docs.dns.length} 件</div><div class="tile-sub">${sum(docs.dns)}（税込）</div></div>
+      <div class="tile"><div class="tile-label">発注書（この取引先へ）</div><div class="tile-value">${docs.pos.length} 件</div><div class="tile-sub">${sum(docs.pos)}（税込）</div></div>
+    </div>
+    <section class="card">
+      <h2>受注（お客様として）</h2>
+      ${docs.orders.length ? orderTableHTML(docs.orders) : `<div class="empty">この取引先の受注はまだありません。<br>
+        <a class="btn btn-primary" href="#/orders/new?customer=${p.id}">＋ この取引先の受注を登録</a></div>`}
+    </section>
+    <section class="card">
+      <h2>納品書（お客様として）</h2>
+      ${docs.dns.length ? docTableHTML('dn', docs.dns) : '<div class="empty">この取引先あての納品書はまだありません。受注の画面から作成できます。</div>'}
+    </section>
+    <section class="card">
+      <h2>発注書（仕入先として）</h2>
+      ${docs.pos.length ? docTableHTML('po', docs.pos) : `<div class="empty">この取引先への発注書はまだありません。<br>
+        <a class="btn" href="#/pos/new?supplier=${p.id}">＋ この取引先へ発注書を作成</a></div>`}
+    </section>`);
+
+  bindListFilter($('#view'));
+  $('[data-act=edit]').addEventListener('click', async () => {
+    if (await openPartnerDialog(p)) viewPartnerDetail(id);
+  });
 }
 
 // ---------- 商品・色マスタ ----------
