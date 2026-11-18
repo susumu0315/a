@@ -58,7 +58,9 @@ h2 { font-size: 1.1rem; margin: 0 0 .9rem; }
   background: var(--surface); border-bottom: 1px solid var(--line); padding: 10px 24px;
   position: sticky; top: 0; z-index: 5;
 }
-.search { display: flex; gap: 8px; max-width: 640px; }
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.search { display: flex; gap: 8px; max-width: 640px; flex: 1; }
+.sync { color: var(--muted); font-size: .82rem; white-space: nowrap; }
 .search input { flex: 1; }
 .view { padding: 24px; max-width: 1280px; width: 100%; }
 
@@ -147,6 +149,9 @@ input.num { text-align: right; }
 .st-po { background: #f1eafb; color: var(--c-po); }
 .st-partial { background: #e6f0ff; color: var(--c-order); }
 .st-done { background: #e3f5ea; color: var(--ok); }
+.st-ng { background: #fdecec; color: var(--danger); }
+table.stock input { width: 100px; text-align: right; }
+table.stock tfoot th, table.stock tfoot td { font-weight: 700; border-top: 2px solid var(--line); }
 .no-tag {
   display: inline-block; font-family: ui-monospace, Consolas, monospace; font-weight: 700;
   font-size: .88rem; padding: 0 6px; border-radius: 4px; white-space: nowrap;
@@ -354,8 +359,9 @@ table.doc-sum tr.grand th, table.doc-sum tr.grand td { font-weight: 800; font-si
 .receipt-msg { font-size: 8.5pt; margin-right: 4mm; align-self: flex-end; }
 
 /* ---------- responsive ---------- */
+.tiles.tiles-3 { grid-template-columns: repeat(3, 1fr); }
 @media (max-width: 1000px) {
-  .tiles { grid-template-columns: repeat(2, 1fr); }
+  .tiles, .tiles.tiles-3 { grid-template-columns: repeat(2, 1fr); }
   dl.info { grid-template-columns: repeat(2, 1fr); }
   .grid-4 { grid-template-columns: repeat(2, 1fr); }
 }

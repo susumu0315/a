@@ -1,12 +1,17 @@
 /* resqmej 受注・発注管理
  * データの流れ：受注（お客様発注No.・自社受注No.）→ 発注書（発注No.）→ 納品書（納品書No.）
- * すべての書類は「自社受注」を軸に紐付けられます。データはブラウザ（localStorage）に保存されます。
+ * すべての書類は「自社受注」を軸に紐付けられます。
+ * Google Apps Script から配信されたときはスプレッドシートに、ファイルを直接開いたときはブラウザ（localStorage）に保存します。
  */
 'use strict';
 
 const APP_TITLE = 'resqmej 受注・発注管理';
 const STORE_KEY = 'resqmej-data-v1';
+const REMOTE = typeof google !== 'undefined' && !!google.script?.run;
+const LOGO_SRC = 'img/logo.png'; // Apps Script 用のビルドでは data URI に置き換わる
 const KIND_LABEL = { customer: '顧客', supplier: '仕入先', both: '顧客・仕入先' };
+const BILLING = { 未処理: 'st-new', 発行済: 'st-po', 送付済: 'st-partial', 入金確認済: 'st-done' };
+const JUDGE = { OK: 'st-done', 要発注: 'st-new', 在庫不足: 'st-ng' };
 const STATUS = {
   new: { label: '未発注', cls: 'st-new' },
   po: { label: '発注済・納品待ち', cls: 'st-po' },
@@ -69,11 +74,12 @@ const PARTNERS_DEFAULT = [
 
 // 商品・色マスタの初期値（色は防災品受注管理表のマスタより）
 const PRODUCTS_DEFAULT = [{ name: 'レスキューミー', unit: '個', price: 1250, useColor: true }];
-const COLORS_DEFAULT = ['イエロー', 'レッド', 'ブラック', 'オレンジ', 'ブルー', 'グリーン', 'ピンク', 'ホワイト', 'アーミーグリーン', '蓄光イエロー'];
+const COLORS_DEFAULT = ['イエロー', 'レッド', 'ブラック', 'オレンジ', 'ブルー', 'グリーン', 'ピンク', 'ホワイト', 'アーミーグリーン', '蓄光イエロー', 'アソート'];
+const STAFF_DEFAULT = ['瀬山', '小林', '小澤'];
 
 function defaultData() {
   return {
-    version: 4,
+    version: 5,
     settings: {
       company: { ...COMPANY_DEFAULT },
       showLogo: true,
@@ -84,9 +90,13 @@ function defaultData() {
     partners: PARTNERS_DEFAULT.map(p => ({ id: uid(), ...p })),
     products: PRODUCTS_DEFAULT.map(p => ({ id: uid(), ...p })),
     colors: [...COLORS_DEFAULT],
+    staff: [...STAFF_DEFAULT],
+    stock: { opening: {}, reorder: {} }, // 色ごとの期首在庫・発注点
     orders: [],
     pos: [],
     deliveries: [],
+    receipts: [], // 入庫記録
+    prospects: [], // 見込み案件
   };
 }
 
@@ -101,12 +111,16 @@ function normalize(d) {
   if ((d.version || 1) < 3) {
     PARTNERS_DEFAULT.forEach(p => { if (!partners.some(x => x.name === p.name)) partners.push({ id: uid(), ...p }); });
   }
+  const colors = d.colors || def.colors;
+  if ((d.version || 1) < 5 && !colors.includes('アソート')) colors.push('アソート');
   return {
     ...def,
     ...d,
     partners,
     products: d.products || def.products,
-    colors: d.colors || def.colors,
+    colors,
+    staff: d.staff || def.staff,
+    stock: { opening: {}, reorder: {}, ...(d.stock || {}) },
     version: def.version,
     settings: {
       ...def.settings,
@@ -127,13 +141,144 @@ function load() {
   return defaultData();
 }
 
-let db = load();
+let db = REMOTE ? defaultData() : load();
+
+// ---------- スプレッドシートとの同期（Apps Script 配信時のみ） ----------
+// レコードを持つ一覧と、1 件だけの設定値。スプレッドシートではそれぞれ 1 シートになる
+const COLLS = ['partners', 'products', 'orders', 'pos', 'deliveries', 'receipts', 'prospects'];
+const CONFIG_KEYS = ['version', 'settings', 'colors', 'staff', 'stock'];
+let synced = {}; // 最後にサーバーと一致していた内容 { 一覧: { id: JSON } }
+let revs = {}; // サーバー側の版 { 一覧: { id: rev } }。他の人の更新との衝突検知に使う
+let saveQueue = Promise.resolve();
+let pending = 0;
+let generation = 0;
+let currentUser = '';
+
+const callServer = (fn, arg) => new Promise((resolve, reject) => {
+  google.script.run
+    .withSuccessHandler(r => resolve(JSON.parse(r)))
+    .withFailureHandler(reject)[fn](JSON.stringify(arg ?? null));
+});
+
+function snapshot(d) {
+  const out = { config: {} };
+  CONFIG_KEYS.forEach(k => { if (d[k] !== undefined) out.config[k] = JSON.stringify(d[k]); });
+  COLLS.forEach(c => { out[c] = Object.fromEntries((d[c] || []).map(r => [r.id, JSON.stringify(r)])); });
+  return out;
+}
+
+// スプレッドシートで見たときに内容がわかるように付ける説明
+function recordLabel(coll, id, r) {
+  const items = r.items ? r.items.map(it => `${it.name}${it.spec ? `（${it.spec}）` : ''}×${it.qty}`).join('、') : '';
+  switch (coll) {
+    case 'orders': return `${r.orderNo}｜${r.orderDate}｜${partnerName(r.customerId)}｜${items}`;
+    case 'pos': return `${r.poNo}｜${r.poDate}｜${partnerName(r.supplierId)}｜${items}`;
+    case 'deliveries': return `${r.dnNo}｜${r.deliveryDate}｜${partnerName(getOrder(r.orderId)?.customerId)}｜${items}`;
+    case 'receipts': return `${r.date}｜${r.color}｜${r.qty}`;
+    case 'prospects': return `${r.date}｜${r.company}｜${r.product}｜${r.color || ''}×${r.qty}`;
+    case 'config': return id;
+    default: return r.name || id;
+  }
+}
+
+function setSync(text) {
+  const el = $('#sync');
+  if (el) el.textContent = text ?? (pending ? '保存中…' : `✓ 保存済み${currentUser ? '（' + currentUser + '）' : ''}`);
+}
 
 function save() {
-  try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(db));
-  } catch (e) {
-    alert('保存に失敗しました：' + e.message);
+  if (!REMOTE) {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify(db));
+    } catch (e) {
+      alert('保存に失敗しました：' + e.message);
+    }
+    return;
+  }
+  // 前回から変わったレコードだけをサーバーへ送る
+  const cur = snapshot(db);
+  const ops = [];
+  Object.entries(cur).forEach(([coll, recs]) => Object.entries(recs).forEach(([id, json]) => {
+    if (synced[coll]?.[id] !== json) ops.push({ coll, id, data: JSON.parse(json), label: recordLabel(coll, id, JSON.parse(json)) });
+  }));
+  Object.entries(synced).forEach(([coll, recs]) => Object.keys(recs).forEach(id => {
+    if (!(id in (cur[coll] || {}))) ops.push({ coll, id, del: true });
+  }));
+  synced = cur;
+  if (ops.length) pushOps(ops);
+}
+
+function pushOps(ops) {
+  const gen = generation;
+  pending++;
+  setSync();
+  saveQueue = saveQueue.then(async () => {
+    if (gen !== generation) return; // 読み込み直した後は古い変更を送らない
+    ops.forEach(op => { op.baseRev = revs[op.coll]?.[op.id] || ''; });
+    const res = await callServer('apiSave', { ops });
+    if (!res.ok) throw new Error(res.message);
+    res.revs.forEach(({ coll, id, rev }) => {
+      revs[coll] = revs[coll] || {};
+      if (rev) revs[coll][id] = rev;
+      else delete revs[coll][id];
+    });
+  }).catch(async err => {
+    alert(`保存できませんでした。\n${err.message || err}\n\n最新の内容を読み込み直します。`);
+    try { await reload(); } catch (e) { console.error(e); }
+    route();
+  }).finally(() => {
+    pending--;
+    setSync();
+  });
+}
+
+async function reload() {
+  const res = await callServer('apiLoad');
+  generation++;
+  currentUser = res.user || '';
+  revs = {};
+  const raw = {};
+  Object.entries(res.data).forEach(([coll, list]) => {
+    revs[coll] = Object.fromEntries(list.map(r => [r.id, r.rev]));
+    if (coll === 'config') list.forEach(r => { raw[r.id] = r.data; });
+    else raw[coll] = list.map(r => r.data);
+  });
+  const empty = !res.data.config?.length;
+  synced = empty ? {} : snapshot(raw);
+  db = empty ? defaultData() : normalize(clone(raw));
+  save(); // 空のスプレッドシートには初期データを、旧版のデータには移行結果を書き込む
+  setSync();
+}
+
+// バックアップからの復元・全削除：スプレッドシートの内容をまるごと置き換える
+async function replaceAll(next) {
+  if (!REMOTE) {
+    db = next;
+    save();
+    return;
+  }
+  await saveQueue;
+  const data = {};
+  Object.entries(snapshot(next)).forEach(([coll, recs]) => {
+    data[coll] = Object.entries(recs).map(([id, json]) => ({ id, data: JSON.parse(json), label: '' }));
+  });
+  db = next; // 説明文の取引先名を引けるように先に差し替える
+  Object.entries(data).forEach(([coll, list]) => list.forEach(r => { r.label = recordLabel(coll, r.id, r.data); }));
+  const res = await callServer('apiReplaceAll', { data });
+  if (!res.ok) throw new Error(res.message);
+  await reload();
+}
+
+// 他の人の変更を取り込む（入力中の画面では行わない）
+async function refreshIfIdle() {
+  if (!REMOTE || pending || document.hidden) return;
+  if (/[/?](new|edit)\b|^#\/(masters|settings)/.test(location.hash) || document.activeElement?.matches('input, textarea, select')) return;
+  const before = JSON.stringify(snapshot(db));
+  try { await reload(); } catch (e) { return console.error(e); }
+  if (JSON.stringify(snapshot(db)) !== before) {
+    const y = window.scrollY;
+    route();
+    window.scrollTo(0, y);
   }
 }
 
@@ -195,6 +340,39 @@ function orderStatus(o) {
   return { key, ...STATUS[key] };
 }
 
+// 回答納期があればそれを、なければ希望納期を納期として扱う
+const dueOf = o => o.answerDate || o.dueDate || '';
+const billingBadge = b => (b ? `<span class="badge ${BILLING[b] || ''}">${esc(b)}</span>` : '<span class="muted">—</span>');
+
+// 色別在庫：現在庫＝期首在庫＋入庫累計－出荷済（納品書）／有効在庫＝現在庫－引当（受注のうち未納品の数量）
+function stockRows(excludeDnId) {
+  const z = () => ({ received: 0, shipped: 0, allocated: 0 });
+  const map = {};
+  const at = c => (map[c] = map[c] || z());
+  db.colors.forEach(at);
+  db.receipts.forEach(r => { at(r.color).received += toNum(r.qty); });
+  db.deliveries.forEach(d => {
+    if (d.id === excludeDnId) return;
+    d.items.forEach(it => { if (it.spec) at(it.spec).shipped += toNum(it.qty); });
+  });
+  db.orders.forEach(o => {
+    const dmap = deliveredMap(o.id, excludeDnId);
+    o.items.forEach(it => {
+      const rest = toNum(it.qty) - (dmap[it.id] || 0);
+      if (it.spec && rest > 0) at(it.spec).allocated += rest;
+    });
+  });
+  Object.keys(db.stock.opening).forEach(at);
+  return Object.entries(map).map(([color, v]) => {
+    const opening = toNum(db.stock.opening[color]);
+    const reorder = toNum(db.stock.reorder[color]);
+    const current = opening + v.received - v.shipped;
+    const available = current - v.allocated;
+    const judge = available < 0 ? '在庫不足' : available <= reorder ? '要発注' : 'OK';
+    return { color, opening, ...v, current, available, reorder, judge };
+  });
+}
+
 const badge = st => `<span class="badge ${st.cls}">${st.label}</span>`;
 const tag = (no, cls) => (no ? `<span class="no-tag ${cls}">${esc(no)}</span>` : '<span class="muted">—</span>');
 const findProduct = name => db.products.find(p => p.name === name);
@@ -244,7 +422,7 @@ function remainingItems(order, excludeDnId) {
 const routes = [
   [/^\/$/, viewDashboard],
   [/^\/orders$/, (m, q) => viewOrderList(q)],
-  [/^\/orders\/new$/, (m, q) => viewOrderForm(null, q.get('customer'))],
+  [/^\/orders\/new$/, (m, q) => viewOrderForm(null, q.get('customer'), q.get('prospect'))],
   [/^\/orders\/([^/]+)\/edit$/, m => viewOrderForm(m[1])],
   [/^\/orders\/([^/]+)$/, m => viewOrderDetail(m[1])],
   [/^\/pos$/, () => viewDocList('po')],
@@ -257,6 +435,8 @@ const routes = [
   [/^\/deliveries\/([^/]+)$/, m => viewDocDetail('dn', m[1])],
   [/^\/partners$/, viewPartners],
   [/^\/partners\/([^/]+)$/, m => viewPartnerDetail(m[1])],
+  [/^\/stock$/, viewStock],
+  [/^\/prospects$/, (m, q) => viewProspects(q.get('edit'))],
   [/^\/masters$/, viewMasters],
   [/^\/settings$/, viewSettings],
   [/^\/search$/, (m, q) => viewSearch(q.get('q') || '')],
@@ -518,13 +698,16 @@ function itemsReadonlyHTML(doc, { progress } = {}) {
 function bindListFilter(root, extra) {
   const input = $('[data-filter]', root);
   const sel = $('[data-status-filter]', root);
+  const billSel = $('[data-billing-filter]', root);
   const apply = () => {
     const q = (input?.value || '').trim().toLowerCase();
     const st = sel?.value || '';
+    const bill = billSel?.value || '';
     let shown = 0;
     $$('tbody tr[data-search]', root).forEach(tr => {
       const stOk = !st || (st === 'open' ? tr.dataset.status !== 'done' : tr.dataset.status === st);
-      const ok = (!q || tr.dataset.search.toLowerCase().includes(q)) && stOk;
+      const billOk = !bill || tr.dataset.billing === bill;
+      const ok = (!q || tr.dataset.search.toLowerCase().includes(q)) && stOk && billOk;
       tr.hidden = !ok;
       if (ok) shown++;
     });
@@ -533,6 +716,7 @@ function bindListFilter(root, extra) {
   };
   input?.addEventListener('input', apply);
   sel?.addEventListener('change', apply);
+  billSel?.addEventListener('change', apply);
   $$('tr.clickable', root).forEach(tr => tr.addEventListener('click', e => {
     if (!e.target.closest('a,button')) go(tr.dataset.href);
   }));
@@ -549,8 +733,10 @@ function viewDashboard() {
   const ym = today().slice(0, 7);
   const month = db.orders.filter(o => (o.orderDate || '').startsWith(ym));
   const monthTotal = month.reduce((s, o) => s + calc(o).total, 0);
-  const soon = open.filter(x => x.o.dueDate && daysUntil(x.o.dueDate) <= 7)
-    .sort((a, b) => a.o.dueDate.localeCompare(b.o.dueDate));
+  const soon = open.filter(x => dueOf(x.o) && daysUntil(dueOf(x.o)) <= 7)
+    .sort((a, b) => dueOf(a.o).localeCompare(dueOf(b.o)));
+  const lowStock = stockRows().filter(r => r.judge !== 'OK');
+  const unbilled = sts.filter(x => x.st.key === 'done' && (x.o.billing || '未処理') === '未処理');
 
   render(`
     ${!c.name ? `<div class="banner"><span>はじめに <b>自社情報（会社名・住所など）</b> を登録してください。発注書・納品書に印字されます。</span>
@@ -569,11 +755,14 @@ function viewDashboard() {
       </div>
     </section>
 
-    <div class="tiles">
+    <div class="tiles tiles-3">
       <a class="tile" href="#/orders"><div class="tile-label">今月の受注</div><div class="tile-value">${month.length} 件</div><div class="tile-sub">${yen(monthTotal)}（税込）</div></a>
       <a class="tile ${noPo.length ? 'is-alert' : ''}" href="#/orders?status=new"><div class="tile-label">未発注の受注</div><div class="tile-value">${noPo.length} 件</div><div class="tile-sub">発注書がまだの受注</div></a>
       <a class="tile" href="#/orders?status=open"><div class="tile-label">未納品の受注</div><div class="tile-value">${open.length} 件</div><div class="tile-sub">納品が完了していない受注</div></a>
       <a class="tile ${soon.length ? 'is-alert' : ''}" href="#/orders?status=open"><div class="tile-label">納期 7 日以内</div><div class="tile-value">${soon.length} 件</div><div class="tile-sub">納期超過を含む</div></a>
+      <a class="tile ${lowStock.length ? 'is-alert' : ''}" href="#/stock"><div class="tile-label">要発注・在庫不足の色</div><div class="tile-value">${lowStock.length} 色</div>
+        <div class="tile-sub">${lowStock.length ? lowStock.map(r => esc(r.color)).join('・') : '在庫は足りています'}</div></a>
+      <a class="tile ${unbilled.length ? 'is-alert' : ''}" href="#/orders?status=done&billing=未処理"><div class="tile-label">請求書が未処理</div><div class="tile-value">${unbilled.length} 件</div><div class="tile-sub">納品完了の受注のうち</div></a>
     </div>
 
     <section class="card">
@@ -590,34 +779,42 @@ function viewDashboard() {
 
 // ---------- 受注 ----------
 function dueHTML(o, st) {
-  if (!o.dueDate) return '<span class="muted">—</span>';
-  const d = daysUntil(o.dueDate);
+  const due = dueOf(o);
+  if (!due) return '<span class="muted">—</span>';
+  const d = daysUntil(due);
   const warn = st.key !== 'done' && d <= 3;
-  return `<span class="${warn ? 'due-soon' : ''}">${esc(o.dueDate)}${warn ? (d < 0 ? '（超過）' : d === 0 ? '（本日）' : `（あと${d}日）`) : ''}</span>`;
+  return `<span class="${warn ? 'due-soon' : ''}">${esc(due)}${warn ? (d < 0 ? '（超過）' : d === 0 ? '（本日）' : `（あと${d}日）`) : ''}</span>`;
 }
+
+// 明細の品名・色・数量を一覧用に短くまとめる
+const itemsSummary = items => items.map(it => `${it.spec || it.name} ${num(it.qty)}`).join('、');
 
 function orderTableHTML(orders) {
   return `<div class="table-wrap"><table class="list">
-    <thead><tr><th>自社受注No.</th><th>お客様発注No.</th><th>受注日</th><th>お客様</th><th>件名</th><th>納期</th>
-      <th class="num">金額（税込）</th><th>発注書</th><th>納品書</th><th>状況</th></tr></thead>
+    <thead><tr><th>自社受注No.</th><th>お客様発注No.</th><th>受注日</th><th>お客様</th><th>内容</th><th>納期</th><th>担当</th>
+      <th class="num">金額（税込）</th><th>発注書</th><th>納品書</th><th>状況</th><th>請求書</th></tr></thead>
     <tbody>${orders.map(o => {
       const st = orderStatus(o);
       const pos = posOf(o.id);
       const dns = dnsOf(o.id);
-      const search = [o.orderNo, o.customerPoNo, partnerName(o.customerId), o.subject, ...pos.map(p => p.poNo), ...dns.map(d => d.dnNo)].join(' ');
-      return `<tr class="clickable" data-href="#/orders/${o.id}" data-search="${esc(search)}" data-status="${st.key}">
+      const billing = o.billing || '未処理';
+      const search = [o.orderNo, o.customerPoNo, partnerName(o.customerId), o.subject, o.staff, itemsSummary(o.items), ...pos.map(p => p.poNo), ...dns.map(d => d.dnNo)].join(' ');
+      return `<tr class="clickable" data-href="#/orders/${o.id}" data-search="${esc(search)}" data-status="${st.key}" data-billing="${esc(billing)}">
         <td>${tag(o.orderNo, 'is-order')}</td><td>${tag(o.customerPoNo, 'is-cust')}</td><td class="nowrap">${esc(o.orderDate)}</td>
-        <td class="wide">${partnerLink(o.customerId)}</td><td class="wide">${esc(o.subject)}</td><td class="nowrap">${dueHTML(o, st)}</td>
+        <td class="wide">${partnerLink(o.customerId)}</td>
+        <td class="wide">${o.subject ? `<b>${esc(o.subject)}</b><br>` : ''}<span class="muted">${esc(itemsSummary(o.items))}</span></td>
+        <td class="nowrap">${dueHTML(o, st)}</td><td class="nowrap">${esc(o.staff) || '<span class="muted">—</span>'}</td>
         <td class="num">${yen(calc(o).total)}</td>
         <td>${pos.map(p => `<a href="#/pos/${p.id}">${tag(p.poNo, 'is-po')}</a>`).join(' ') || '<span class="muted">—</span>'}</td>
         <td>${dns.map(d => `<a href="#/deliveries/${d.id}">${tag(d.dnNo, 'is-dn')}</a>`).join(' ') || '<span class="muted">—</span>'}</td>
-        <td>${badge(st)}</td></tr>`;
+        <td>${badge(st)}</td><td>${billingBadge(billing)}</td></tr>`;
     }).join('')}</tbody></table></div>`;
 }
 
 function viewOrderList(q) {
   const orders = [...db.orders].sort(byDateNoDesc('orderDate', 'orderNo'));
   const status = q.get('status') || '';
+  const billing = q.get('billing') || '';
   render(`
     <div class="page-head">
       <div><div class="crumb">ステップ ①</div><h1>受注一覧</h1></div>
@@ -626,11 +823,15 @@ function viewOrderList(q) {
     <section class="card">
       ${orders.length ? `
       <div class="filters">
-        <input type="search" data-filter placeholder="番号・お客様名・件名で絞り込み">
+        <input type="search" data-filter placeholder="番号・お客様名・色・担当で絞り込み">
         <select data-status-filter>
           <option value="">すべての状況</option>
           <option value="open" ${status === 'open' ? 'selected' : ''}>未納品（完了以外すべて）</option>
           ${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${status === k ? 'selected' : ''}>${v.label}</option>`).join('')}
+        </select>
+        <select data-billing-filter>
+          <option value="">請求書：すべて</option>
+          ${Object.keys(BILLING).map(b => `<option ${billing === b ? 'selected' : ''}>${b}</option>`).join('')}
         </select>
         <span class="muted" data-count></span>
       </div>
@@ -639,13 +840,29 @@ function viewOrderList(q) {
   bindListFilter($('#view'));
 }
 
-function viewOrderForm(id, customerParam) {
+function staffOptions(selected) {
+  const list = [...db.staff];
+  if (selected && !list.includes(selected)) list.push(selected);
+  return '<option value="">— 選択 —</option>' + list.map(s => `<option ${s === selected ? 'selected' : ''}>${esc(s)}</option>`).join('');
+}
+
+function viewOrderForm(id, customerParam, prospectParam) {
   const editing = id ? getOrder(id) : null;
   if (id && !editing) return notFound();
+  const pr = !editing && prospectParam ? db.prospects.find(x => x.id === prospectParam) : null;
   const o = editing ? clone(editing) : {
     id: uid(), orderNo: nextNo('order'), customerPoNo: '', customerId: getPartner(customerParam) ? customerParam : '', orderDate: today(), dueDate: '',
-    subject: '', taxRate: db.settings.taxRate, items: [blankItem(true)], note: '',
+    answerDate: '', staff: '', billing: '未処理', subject: '', taxRate: db.settings.taxRate, items: [blankItem(true)], note: '',
   };
+  if (pr) {
+    // 見込み案件から受注にする：会社名が一致する取引先と、品名・色・数量・納期・担当を引き継ぐ
+    const p = findProduct(pr.product);
+    Object.assign(o, {
+      customerId: db.partners.find(x => x.name === pr.company)?.id || '', dueDate: pr.dueDate || '', answerDate: pr.answerDate || '',
+      staff: pr.staff || '', note: pr.note || '',
+      items: [{ id: uid(), name: pr.product, spec: pr.color || '', qty: toNum(pr.qty), unit: p?.unit || '個', price: p ? p.price : '' }],
+    });
+  }
 
   render(`
     <div class="page-head">
@@ -668,15 +885,20 @@ function viewOrderForm(id, customerParam) {
           </div>
         </div>
       </section>
+      ${pr ? `<div class="banner">見込み案件（${esc(pr.date)}｜${esc(pr.company)}）から受注を登録します。${o.customerId ? '' : '<b>お客様を選択（または「＋ 新規」で登録）してください。</b>'}</div>` : ''}
       <section class="card">
         <h2>受注内容</h2>
         <div class="grid-4">
           <div class="span-2">${partnerSelectField('customerId', 'お客様（注文元）', 'customer', o.customerId)}</div>
           <div class="field"><label>受注日</label><input type="date" name="orderDate" value="${esc(o.orderDate)}"></div>
-          <div class="field"><label>納期</label><input type="date" name="dueDate" value="${esc(o.dueDate)}"></div>
-          <div class="field span-2"><label>件名</label><input name="subject" value="${esc(o.subject)}" placeholder="例：〇〇工事用部材一式"></div>
+          <div class="field"><label>担当者</label><select name="staff">${staffOptions(o.staff)}</select></div>
+          <div class="field"><label>希望納期 <span class="opt">（お客様）</span></label><input type="date" name="dueDate" value="${esc(o.dueDate)}"></div>
+          <div class="field"><label>回答納期 <span class="opt">（当社回答）</span></label><input type="date" name="answerDate" value="${esc(o.answerDate)}"></div>
+          <div class="field"><label>請求書</label><select name="billing">${Object.keys(BILLING).map(b => `<option ${b === (o.billing || '未処理') ? 'selected' : ''}>${b}</option>`).join('')}</select></div>
           <div class="field"><label>消費税率（%）</label><input type="number" name="taxRate" value="${esc(o.taxRate)}" min="0" step="any" class="num"></div>
+          <div class="field span-2"><label>件名</label><input name="subject" value="${esc(o.subject)}" placeholder="例：〇〇工事用部材一式"></div>
         </div>
+        <p class="hint">納期の管理（ホームの「納期が近い受注」など）には、回答納期があれば回答納期、なければ希望納期を使います。</p>
       </section>
       <section class="card">
         <h2>明細（お客様への販売単価）</h2>
@@ -708,12 +930,14 @@ function viewOrderForm(id, customerParam) {
     if (itemsError(items)) return toast(itemsError(items), 'error');
     Object.assign(o, {
       orderNo: f.orderNo, customerPoNo: f.customerPoNo.trim(), customerId: f.customerId, orderDate: f.orderDate,
-      dueDate: f.dueDate, subject: f.subject.trim(), taxRate: toNum(f.taxRate), items, note: f.note,
+      dueDate: f.dueDate, answerDate: f.answerDate, staff: f.staff, billing: f.billing,
+      subject: f.subject.trim(), taxRate: toNum(f.taxRate), items, note: f.note,
       updatedAt: new Date().toISOString(),
     });
     linkPartnerKind(o.customerId, 'customer');
     if (editing) db.orders[db.orders.indexOf(editing)] = o;
     else db.orders.push({ ...o, createdAt: o.updatedAt });
+    if (pr) pr.orderId = o.id;
     save();
     toast('受注を保存しました');
     go(`#/orders/${o.id}`);
@@ -754,7 +978,11 @@ function viewOrderDetail(id) {
         <div><dt>自社受注No.</dt><dd>${tag(o.orderNo, 'is-order')}</dd></div>
         <div><dt>お客様発注No.</dt><dd>${tag(o.customerPoNo, 'is-cust')}</dd></div>
         <div><dt>受注日</dt><dd>${fmtDate(o.orderDate) || '—'}</dd></div>
-        <div><dt>納期</dt><dd>${dueHTML(o, st)}</dd></div>
+        <div><dt>担当者</dt><dd>${esc(o.staff) || '—'}</dd></div>
+        <div><dt>希望納期</dt><dd>${fmtDate(o.dueDate) || '—'}</dd></div>
+        <div><dt>回答納期</dt><dd>${fmtDate(o.answerDate) || '—'}</dd></div>
+        <div><dt>納期まで</dt><dd>${dueHTML(o, st)}</dd></div>
+        <div><dt>請求書</dt><dd><select data-act="billing" style="width:auto">${Object.keys(BILLING).map(b => `<option ${b === (o.billing || '未処理') ? 'selected' : ''}>${b}</option>`).join('')}</select></dd></div>
         <div class="span-2"><dt>お客様</dt><dd>${partnerLink(o.customerId)} ${cu?.contact ? `<span class="muted">／${esc(cu.contact)}</span>` : ''}</dd></div>
         <div class="span-2"><dt>件名</dt><dd>${esc(o.subject) || '—'}</dd></div>
       </dl>
@@ -762,11 +990,17 @@ function viewOrderDetail(id) {
       ${o.note ? `<p class="hint" style="white-space:pre-wrap">メモ：${esc(o.note)}</p>` : ''}
     </section>`);
 
+  $('[data-act=billing]').addEventListener('change', e => {
+    o.billing = e.target.value;
+    save();
+    toast(`請求書を「${o.billing}」にしました`);
+  });
   $('[data-act=delete]').addEventListener('click', () => {
     const n = posOf(o.id).length + dnsOf(o.id).length;
     if (n) return alert(`この受注には発注書・納品書が ${n} 件紐付いています。\n先にそれらを削除してから受注を削除してください。`);
     if (!confirm(`受注 ${o.orderNo} を削除します。よろしいですか？`)) return;
     db.orders = db.orders.filter(x => x.id !== o.id);
+    db.prospects.forEach(p => { if (p.orderId === o.id) p.orderId = ''; });
     save();
     toast('受注を削除しました');
     go('#/orders');
@@ -897,7 +1131,7 @@ function docHTML(type, d) {
       <div class="doc-from">
         <table class="doc-meta">${meta.map(([k, v]) => `<tr><th>${k}</th><td>${esc(v || '—')}</td></tr>`).join('')}</table>
         <div class="company">
-          ${db.settings.showLogo ? `<img class="company-logo" src="img/logo.png" alt="${esc(c.name)}">` : `<div class="company-name">${esc(c.name || '（自社名未設定：設定画面で登録）')}</div>`}
+          ${db.settings.showLogo ? `<img class="company-logo" src="${LOGO_SRC}" alt="${esc(c.name)}">` : `<div class="company-name">${esc(c.name || '（自社名未設定：設定画面で登録）')}</div>`}
           ${c.dept ? `<div class="company-dept">${esc(c.dept)}</div>` : ''}
           ${c.zip || c.address ? `<div>${c.zip ? '〒' + esc(c.zip) + '　' : ''}${esc(c.address)}</div>` : ''}
           ${c.tel || c.fax ? `<div>${c.tel ? 'TEL ' + esc(c.tel) : ''}${c.fax ? '　FAX ' + esc(c.fax) : ''}</div>` : ''}
@@ -941,7 +1175,7 @@ function poItemsFromOrder(order) {
 function linkInfoHTML(o) {
   if (!o) return '<span class="muted">受注に紐付けると、自社受注No.・お客様発注No.が書類に入ります。</span>';
   return `<span>自社受注No.：<b>${esc(o.orderNo)}</b></span><span>お客様発注No.：<b>${esc(o.customerPoNo || '—')}</b></span>
-    <span>お客様：<b>${esc(partnerName(o.customerId))}</b></span><span>納期：<b>${esc(o.dueDate || '—')}</b></span>`;
+    <span>お客様：<b>${esc(partnerName(o.customerId))}</b></span><span>納期：<b>${esc(dueOf(o) || '—')}</b></span>`;
 }
 
 function viewPoForm(id, orderIdParam, supplierParam) {
@@ -950,7 +1184,7 @@ function viewPoForm(id, orderIdParam, supplierParam) {
   const src = orderIdParam ? getOrder(orderIdParam) : null;
   const p = editing ? clone(editing) : {
     id: uid(), poNo: nextNo('po'), orderId: src?.id || '', supplierId: getPartner(supplierParam) ? supplierParam : '', poDate: today(),
-    dueDate: src?.dueDate ? addDays(src.dueDate, -2) : '', deliveryPlace: '', paymentTerms: db.settings.paymentTerms || '',
+    dueDate: src && dueOf(src) ? addDays(dueOf(src), -2) : '', deliveryPlace: '', paymentTerms: db.settings.paymentTerms || '',
     subject: src?.subject || '', taxRate: src?.taxRate ?? db.settings.taxRate,
     items: src ? poItemsFromOrder(src) : [blankItem()], note: '',
   };
@@ -1153,6 +1387,11 @@ function viewDnForm(id, orderIdParam) {
       return line && toNum(it.qty) > toNum(line.qty) - (dmap[line.id] || 0);
     });
     if (over && !confirm('受注の残数を超えて納品する行があります。このまま保存しますか？')) return;
+    // 色ごとの今回の出荷数が現在庫を超えていないか
+    const need = {};
+    items.forEach(it => { if (it.spec) need[it.spec] = (need[it.spec] || 0) + toNum(it.qty); });
+    const short = stockRows(d.id).filter(r => need[r.color] > r.current).map(r => `${r.color}：在庫 ${num(r.current)} ／ 今回 ${num(need[r.color])}`);
+    if (short.length && !confirm(`在庫が足りない色があります。\n${short.join('\n')}\n\nこのまま保存しますか？`)) return;
     Object.assign(d, {
       dnNo: f.dnNo, orderId: f.orderId, deliveryDate: f.deliveryDate, subject: f.subject.trim(),
       taxRate: toNum(f.taxRate), items, note: f.note, updatedAt: new Date().toISOString(),
@@ -1303,13 +1542,163 @@ function viewPartnerDetail(id) {
   });
 }
 
+// ---------- 在庫 ----------
+function viewStock() {
+  const rows = stockRows();
+  const sum = f => num(rows.reduce((s, r) => s + r[f], 0));
+  const receipts = [...db.receipts].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  render(`
+    <div class="page-head"><h1>在庫（色別）</h1></div>
+    <p class="hint" style="margin:-8px 0 14px">
+      現在庫 ＝ 期首在庫 ＋ 入庫累計 − 出荷済（納品書の数量）／ 有効在庫 ＝ 現在庫 − 引当（受注のうち、まだ納品していない数量）<br>
+      納品書を作ると出荷済に、受注を登録すると引当に自動で反映されます。<b>期首在庫と発注点だけ</b>を入力してください。
+    </p>
+    <section class="card">
+      <form id="stock-form">
+        <div class="table-wrap"><table class="list stock">
+          <thead><tr><th>色</th><th class="num">期首在庫</th><th class="num">入庫累計</th><th class="num">出荷済</th><th class="num">現在庫</th>
+            <th class="num">引当（未納品）</th><th class="num">有効在庫</th><th class="num">発注点</th><th>判定</th></tr></thead>
+          <tbody>${rows.map(r => `<tr>
+            <td><b>${esc(r.color)}</b></td>
+            <td class="num"><input type="number" step="any" class="num" data-opening="${esc(r.color)}" value="${r.opening || ''}" placeholder="0"></td>
+            <td class="num">${num(r.received)}</td><td class="num">${num(r.shipped)}</td><td class="num"><b>${num(r.current)}</b></td>
+            <td class="num">${num(r.allocated)}</td><td class="num"><b>${num(r.available)}</b></td>
+            <td class="num"><input type="number" step="any" class="num" data-reorder="${esc(r.color)}" value="${r.reorder || ''}" placeholder="0"></td>
+            <td><span class="badge ${JUDGE[r.judge]}">${r.judge}</span></td></tr>`).join('')}</tbody>
+          <tfoot><tr><th>合計</th><td class="num">${sum('opening')}</td><td class="num">${sum('received')}</td><td class="num">${sum('shipped')}</td>
+            <td class="num">${sum('current')}</td><td class="num">${sum('allocated')}</td><td class="num">${sum('available')}</td><td></td><td></td></tr></tfoot>
+        </table></div>
+        <div class="actions" style="margin-top:12px"><button class="btn btn-primary" type="submit">期首在庫・発注点を保存する</button></div>
+      </form>
+    </section>
+    <section class="card">
+      <h2>入庫を登録</h2>
+      <p class="hint" style="margin:-6px 0 10px">仕入・生産などで在庫が増えたときに登録します。「入庫累計」に加算されます。</p>
+      <form id="receipt-form" class="grid-4" autocomplete="off">
+        <div class="field"><label>入庫日</label><input type="date" name="date" value="${today()}"></div>
+        <div class="field"><label>色 <span class="req">必須</span></label><select name="color">${colorOptions('')}</select></div>
+        <div class="field"><label>数量 <span class="req">必須</span></label><input type="number" name="qty" step="any" class="num"></div>
+        <div class="field"><label>備考</label><input name="note" placeholder="例：〇〇より入荷"></div>
+        <div class="span-all"><button class="btn btn-primary" type="submit">＋ 入庫を登録</button></div>
+      </form>
+    </section>
+    <section class="card">
+      <h2>入庫記録</h2>
+      ${receipts.length ? `<div class="table-wrap"><table class="list">
+        <thead><tr><th>入庫日</th><th>色</th><th class="num">数量</th><th>備考</th><th></th></tr></thead>
+        <tbody>${receipts.map(r => `<tr><td class="nowrap">${esc(r.date)}</td><td>${esc(r.color)}</td><td class="num">${num(r.qty)}</td>
+          <td class="wide">${esc(r.note)}</td><td><button class="btn btn-sm btn-danger" data-del-receipt="${r.id}">削除</button></td></tr>`).join('')}</tbody>
+      </table></div>` : '<div class="empty">入庫記録はまだありません。</div>'}
+    </section>`);
+
+  $('#stock-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const opening = {};
+    const reorder = {};
+    $$('[data-opening]').forEach(i => { if (i.value !== '') opening[i.dataset.opening] = toNum(i.value); });
+    $$('[data-reorder]').forEach(i => { if (i.value !== '') reorder[i.dataset.reorder] = toNum(i.value); });
+    db.stock = { opening, reorder };
+    save();
+    toast('期首在庫・発注点を保存しました');
+    viewStock();
+  });
+  $('#receipt-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(e.target));
+    if (!f.color) return toast('色を選択してください', 'error');
+    if (!toNum(f.qty)) return toast('数量を入力してください', 'error');
+    db.receipts.push({ id: uid(), date: f.date, color: f.color, qty: toNum(f.qty), note: f.note.trim() });
+    save();
+    toast(`入庫（${f.color} ${num(f.qty)}）を登録しました`);
+    viewStock();
+  });
+  $$('[data-del-receipt]').forEach(b => b.addEventListener('click', () => {
+    const r = db.receipts.find(x => x.id === b.dataset.delReceipt);
+    if (!confirm(`入庫記録（${r.date} ${r.color} ${num(r.qty)}）を削除しますか？`)) return;
+    db.receipts = db.receipts.filter(x => x.id !== r.id);
+    save();
+    toast('入庫記録を削除しました');
+    viewStock();
+  }));
+}
+
+// ---------- 見込み案件 ----------
+function viewProspects(editId) {
+  const editing = editId ? db.prospects.find(x => x.id === editId) : null;
+  const p = editing || { date: today(), company: '', product: db.products[0]?.name || '', color: '', qty: '', dueDate: '', answerDate: '', staff: '', note: '' };
+  const list = [...db.prospects].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  render(`
+    <div class="page-head"><h1>見込み案件</h1></div>
+    <p class="hint" style="margin:-8px 0 14px">まだ注文になっていない案件を記録します。注文が決まったら「受注にする」で受注登録の画面へ引き継げます。</p>
+    <section class="card">
+      <h2>${editing ? '見込み案件を編集' : '見込み案件を追加'}</h2>
+      <form id="prospect-form" class="grid-4" autocomplete="off">
+        <div class="field"><label>受付日</label><input type="date" name="date" value="${esc(p.date)}"></div>
+        <div class="field span-2"><label>会社名 <span class="req">必須</span></label><input name="company" value="${esc(p.company)}" list="partner-names" placeholder="取引先から選ぶか入力"></div>
+        <div class="field"><label>担当者</label><select name="staff">${staffOptions(p.staff)}</select></div>
+        <div class="field"><label>品名</label><select name="product">${productOptions(p.product)}</select></div>
+        <div class="field"><label>色</label><select name="color">${colorOptions(p.color)}</select></div>
+        <div class="field"><label>数量</label><input type="number" name="qty" step="any" class="num" value="${esc(p.qty)}"></div>
+        <div class="field"><label>希望納期</label><input type="date" name="dueDate" value="${esc(p.dueDate)}"></div>
+        <div class="field"><label>回答納期</label><input type="date" name="answerDate" value="${esc(p.answerDate)}"></div>
+        <div class="field span-2"><label>備考</label><input name="note" value="${esc(p.note)}"></div>
+        <div class="span-all actions">
+          ${editing ? '<a class="btn" href="#/prospects">キャンセル</a>' : ''}
+          <button class="btn btn-primary" type="submit">${editing ? '保存する' : '＋ 追加する'}</button>
+        </div>
+      </form>
+      <datalist id="partner-names">${db.partners.map(x => `<option value="${esc(x.name)}">`).join('')}</datalist>
+    </section>
+    <section class="card">
+      ${list.length ? `
+      <div class="filters"><input type="search" data-filter placeholder="会社名・色・担当で絞り込み"><span class="muted" data-count></span></div>
+      <div class="table-wrap"><table class="list">
+        <thead><tr><th>受付日</th><th>会社名</th><th>品名</th><th>色</th><th class="num">数量</th><th>希望納期</th><th>回答納期</th><th>担当</th><th>備考</th><th></th></tr></thead>
+        <tbody>${list.map(x => {
+          const o = x.orderId ? getOrder(x.orderId) : null;
+          return `<tr data-search="${esc([x.company, x.product, x.color, x.staff, x.note].join(' '))}">
+          <td class="nowrap">${esc(x.date)}</td><td class="wide">${esc(x.company)}</td><td>${esc(x.product)}</td><td>${esc(x.color)}</td>
+          <td class="num">${num(x.qty)}</td><td class="nowrap">${esc(x.dueDate)}</td><td class="nowrap">${esc(x.answerDate)}</td><td>${esc(x.staff)}</td>
+          <td class="wide">${esc(x.note)}</td>
+          <td><span class="actions">
+            ${o ? `<a href="#/orders/${o.id}">${tag(o.orderNo, 'is-order')}</a>` : `<a class="btn btn-sm btn-primary" href="#/orders/new?prospect=${x.id}">受注にする</a>`}
+            <a class="btn btn-sm" href="#/prospects?edit=${x.id}">編集</a>
+            <button class="btn btn-sm btn-danger" data-del-prospect="${x.id}">削除</button></span></td></tr>`;
+        }).join('')}</tbody></table></div>` : '<div class="empty">見込み案件はまだありません。</div>'}
+    </section>`);
+
+  bindListFilter($('#view'));
+  $('#prospect-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(e.target));
+    f.company = f.company.trim();
+    if (!f.company) return toast('会社名を入力してください', 'error');
+    const rec = { date: f.date, company: f.company, product: f.product, color: f.color, qty: toNum(f.qty), dueDate: f.dueDate,
+      answerDate: f.answerDate, staff: f.staff, note: f.note.trim() };
+    if (editing) Object.assign(editing, rec);
+    else db.prospects.push({ id: uid(), orderId: '', ...rec });
+    save();
+    toast('見込み案件を保存しました');
+    if (editing) go('#/prospects');
+    else viewProspects();
+  });
+  $$('[data-del-prospect]').forEach(b => b.addEventListener('click', () => {
+    const x = db.prospects.find(r => r.id === b.dataset.delProspect);
+    if (!confirm(`見込み案件（${x.company}）を削除しますか？`)) return;
+    db.prospects = db.prospects.filter(r => r.id !== x.id);
+    save();
+    toast('見込み案件を削除しました');
+    viewProspects();
+  }));
+}
+
 // ---------- 商品・色マスタ ----------
 function viewMasters() {
   const allItems = () => [...db.orders, ...db.pos, ...db.deliveries].flatMap(d => d.items);
   const usedName = name => allItems().some(it => it.name === name);
   const usedColor = c => allItems().some(it => it.spec === c);
   render(`
-    <div class="page-head"><h1>商品・色マスタ</h1></div>
+    <div class="page-head"><h1>商品・色・担当者マスタ</h1></div>
     <p class="hint" style="margin:-8px 0 14px">ここに登録した商品と色が、受注・発注書・納品書の明細でプルダウンから選べるようになります。</p>
     <section class="card">
       <h2>色</h2>
@@ -1322,7 +1711,16 @@ function viewMasters() {
         <input name="color" placeholder="追加する色（例：シルバー）">
         <button class="btn btn-primary" type="submit">＋ 色を追加</button>
       </form>
-      <p class="hint">‹ › で並び順（プルダウンの表示順）を変えられます。</p>
+      <p class="hint">‹ › で並び順（プルダウンの表示順）を変えられます。色は在庫画面の行にもなります。</p>
+    </section>
+    <section class="card">
+      <h2>担当者</h2>
+      <div class="chips">${db.staff.map((s, i) => `<span class="chip">${esc(s)}
+          <button type="button" class="chip-del" data-del-staff="${i}" title="削除">✕</button></span>`).join('') || '<span class="muted">担当者がいません</span>'}</div>
+      <form class="with-btn" id="staff-form" style="max-width:420px;margin-top:14px" autocomplete="off">
+        <input name="staff" placeholder="追加する担当者（例：山田）">
+        <button class="btn btn-primary" type="submit">＋ 担当者を追加</button>
+      </form>
     </section>
     <section class="card">
       <h2>商品</h2>
@@ -1362,6 +1760,24 @@ function viewMasters() {
     viewMasters();
     $('#color-form').elements.color.focus();
   });
+  $('#staff-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const s = e.target.elements.staff.value.trim();
+    if (!s) return;
+    if (db.staff.includes(s)) return toast('その担当者は既に登録されています', 'error');
+    db.staff.push(s);
+    save();
+    toast(`担当者「${s}」を追加しました`);
+    viewMasters();
+  });
+  $$('[data-del-staff]').forEach(b => b.addEventListener('click', () => {
+    const s = db.staff[+b.dataset.delStaff];
+    if (!confirm(`担当者「${s}」を選択肢から削除しますか？（登録済みの受注の担当者はそのまま残ります）`)) return;
+    db.staff = db.staff.filter(x => x !== s);
+    save();
+    toast('担当者を削除しました');
+    viewMasters();
+  }));
   $$('[data-move]').forEach(b => b.addEventListener('click', () => {
     const i = +b.dataset.move;
     const j = i + +b.dataset.dir;
@@ -1429,7 +1845,7 @@ function viewSettings() {
           <div class="field"><label>担当者名</label><input name="person" value="${esc(c.person)}"></div>
           <div class="field span-2">
             <label><input type="checkbox" name="showLogo" ${s.showLogo ? 'checked' : ''} style="width:auto;margin-right:6px">会社ロゴを書類に印字する</label>
-            <img src="img/logo.png" alt="" style="height:32px;align-self:flex-start;margin-top:4px">
+            <img src="${LOGO_SRC}" alt="" style="height:32px;align-self:flex-start;margin-top:4px">
           </div>
         </div>
       </section>
@@ -1448,7 +1864,9 @@ function viewSettings() {
     </form>
     <section class="card">
       <h2>データの保存・バックアップ</h2>
-      <p class="hint" style="margin-bottom:12px">データはこのパソコンのブラウザ内に保存されています。<b>定期的にバックアップを保存</b>してください（別のパソコンへ移すときもバックアップを使います）。</p>
+      <p class="hint" style="margin-bottom:12px">${REMOTE
+        ? 'データは Google スプレッドシートに保存され、社内で共有されています。他の人の変更は 1 分ごと（または画面に戻ったとき）に自動で反映されます。<br>Excel から取り込んだデータは「バックアップから復元」で読み込めます（スプレッドシートの内容がすべて置き換わります）。'
+        : 'データはこのパソコンのブラウザ内に保存されています（お試し用）。<b>定期的にバックアップを保存</b>してください。社内で共有するには README の手順で Google スプレッドシート版を設定してください。'}</p>
       <div class="actions">
         <button class="btn" data-act="export">⬇ バックアップを保存（JSON）</button>
         <label class="btn">⬆ バックアップから復元<input type="file" accept=".json,application/json" data-act="import" hidden></label>
@@ -1481,31 +1899,36 @@ function viewSettings() {
       const data = JSON.parse(await file.text());
       if (!Array.isArray(data.orders) || !Array.isArray(data.partners)) throw new Error('形式が正しくありません');
       if (!confirm('現在のデータをバックアップの内容で置き換えます。よろしいですか？')) return;
-      db = normalize(data);
-      save();
+      toast('復元しています…');
+      await replaceAll(normalize(data));
       toast('バックアップから復元しました');
       viewSettings();
     } catch (err) {
-      toast('復元できませんでした：' + err.message, 'error');
+      toast('復元できませんでした：' + (err.message || err), 'error');
     }
   });
   $('[data-act=csv]').addEventListener('click', exportCsv);
   $('[data-act=sample]').addEventListener('click', loadSample);
-  $('[data-act=reset]').addEventListener('click', () => {
-    if (!confirm('すべてのデータ（受注・発注書・納品書・取引先・設定）を削除します。元に戻せません。よろしいですか？')) return;
+  $('[data-act=reset]').addEventListener('click', async () => {
+    if (!confirm(`すべてのデータ（受注・発注書・納品書・取引先・在庫・設定）を削除します。${REMOTE ? '社内の全員のデータが消えます。' : ''}元に戻せません。よろしいですか？`)) return;
     if (prompt('確認のため「削除」と入力してください') !== '削除') return;
-    db = defaultData();
-    save();
+    try {
+      await replaceAll(defaultData());
+    } catch (err) {
+      return toast('削除できませんでした：' + (err.message || err), 'error');
+    }
     toast('すべてのデータを削除しました');
     go('#/');
   });
 }
 
 function exportCsv() {
-  const head = ['自社受注No.', 'お客様発注No.', '受注日', 'お客様', '件名', '納期', '受注金額(税込)', '状況', '発注No.', '仕入先', '発注金額(税込)', '納品書No.', '納品日', '納品金額(税込)'];
+  const head = ['自社受注No.', 'お客様発注No.', '受注日', 'お客様', '件名', '明細', '希望納期', '回答納期', '担当者', '受注金額(税込)', '状況', '請求書',
+    '発注No.', '仕入先', '発注金額(税込)', '納品書No.', '納品日', '納品金額(税込)'];
   const rows = [head];
   [...db.orders].sort(byField('orderNo')).forEach(o => {
-    const base = [o.orderNo, o.customerPoNo, o.orderDate, partnerName(o.customerId), o.subject, o.dueDate, calc(o).total, orderStatus(o).label];
+    const base = [o.orderNo, o.customerPoNo, o.orderDate, partnerName(o.customerId), o.subject, itemsSummary(o.items), o.dueDate, o.answerDate,
+      o.staff, calc(o).total, orderStatus(o).label, o.billing || '未処理'];
     const pos = posOf(o.id);
     const dns = dnsOf(o.id);
     const n = Math.max(1, pos.length, dns.length);
@@ -1518,7 +1941,7 @@ function exportCsv() {
     }
   });
   db.pos.filter(p => !getOrder(p.orderId)).forEach(p => {
-    rows.push(['', '', '', '', p.subject, '', '', '紐付けなし', p.poNo, partnerName(p.supplierId), calc(p).total, '', '', '']);
+    rows.push(['', '', '', '', p.subject, itemsSummary(p.items), '', '', '', '', '紐付けなし', '', p.poNo, partnerName(p.supplierId), calc(p).total, '', '', '']);
   });
   const csv = rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
   download(`resqmej_紐付け一覧_${today()}.csv`, '﻿' + csv, 'text/csv');
@@ -1578,6 +2001,23 @@ $('#global-search').addEventListener('submit', e => {
   e.preventDefault();
   go('#/search?q=' + encodeURIComponent(e.target.elements.q.value.trim()));
 });
+// 画面内リンクはハッシュの変更として扱う（Apps Script の画面内でもページ移動しないように）
+document.addEventListener('click', e => {
+  const a = e.target.closest('a[href^="#"]');
+  if (!a || e.defaultPrevented || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  e.preventDefault();
+  go(a.getAttribute('href'));
+});
 window.addEventListener('hashchange', route);
-window.addEventListener('storage', e => { if (e.key === STORE_KEY) { db = load(); route(); } });
-route();
+
+if (REMOTE) {
+  render('<div class="card empty">データを読み込んでいます…</div>');
+  reload().then(route, err => {
+    render(`<div class="card empty">データを読み込めませんでした。<br>${esc(err.message || err)}<br><button class="btn" onclick="location.reload()">再読み込み</button></div>`);
+  });
+  setInterval(refreshIfIdle, 60000);
+  document.addEventListener('visibilitychange', refreshIfIdle);
+} else {
+  window.addEventListener('storage', e => { if (e.key === STORE_KEY) { db = load(); route(); } });
+  route();
+}
