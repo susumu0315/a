@@ -352,6 +352,24 @@ table.doc-sum th, table.doc-sum td { border: 1px solid #555; padding: 1.4mm 2.5m
 table.doc-sum th { background: #eef1f5; text-align: left; font-weight: 600; }
 table.doc-sum td { text-align: right; }
 table.doc-sum tr.grand th, table.doc-sum tr.grand td { font-weight: 800; font-size: 11.5pt; background: #e2e7ee; }
+.doc-set .paper + .paper { margin-top: 24px; }
+.paper[hidden] { display: none; }
+.set-toggles label { cursor: pointer; }
+.set-toggles input { width: auto; margin: 0 4px 0 0; }
+/* 領収書 */
+.rc-amount {
+  display: flex; align-items: baseline; justify-content: center; gap: 6mm; margin: 6mm auto 4mm; width: 130mm;
+  border-bottom: 3px double #111; padding-bottom: 2mm;
+}
+.rc-amount span { font-weight: 700; font-size: 12pt; }
+.rc-amount b { font-size: 24pt; letter-spacing: .05em; }
+.rc-for { text-align: center; margin: 0 0 8mm; line-height: 2; }
+.rc-bottom { display: flex; justify-content: space-between; align-items: flex-start; gap: 6mm; }
+.rc-from { display: flex; flex-direction: column; gap: 3mm; min-width: 70mm; }
+.revenue-stamp {
+  width: 24mm; height: 28mm; border: 1px dashed #555; display: grid; place-items: center;
+  text-align: center; font-size: 9pt; color: #555;
+}
 .receipt { display: flex; justify-content: flex-end; margin-top: 6mm; }
 .receipt-box { border: 1px solid #555; display: flex; font-size: 9pt; }
 .receipt-box > div:first-child { writing-mode: vertical-rl; background: #eef1f5; border-right: 1px solid #555; padding: 2mm 1mm; letter-spacing: .3em; }
@@ -360,6 +378,19 @@ table.doc-sum tr.grand th, table.doc-sum tr.grand td { font-weight: 800; font-si
 
 /* ---------- responsive ---------- */
 .tiles.tiles-3 { grid-template-columns: repeat(3, 1fr); }
+/* 納期の警告 */
+.alerts { padding: 0 24px; max-width: 1280px; width: 100%; }
+.alert-bar {
+  margin-top: 16px; background: #fdecec; border: 1px solid #f3b4b4; border-left: 5px solid var(--danger);
+  border-radius: var(--radius); padding: 10px 14px; color: var(--danger);
+}
+.alert-bar summary { cursor: pointer; font-weight: 600; }
+.alert-bar summary .muted { font-weight: 400; margin-left: 6px; font-size: .85rem; }
+.alert-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.alert-list a { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; color: var(--text); padding: 6px 8px; border-radius: 8px; background: #fff; }
+.alert-list a:hover { text-decoration: none; background: var(--primary-soft); }
+.alert-dialog { max-width: 760px; }
+.alert-dialog h2 { color: var(--danger); }
 @media (max-width: 1000px) {
   .tiles, .tiles.tiles-3 { grid-template-columns: repeat(2, 1fr); }
   dl.info { grid-template-columns: repeat(2, 1fr); }
@@ -373,6 +404,7 @@ table.doc-sum tr.grand th, table.doc-sum tr.grand td { font-weight: 800; font-si
   .nav-step { display: none; }
   .topbar { padding: 10px 16px; position: static; }
   .view { padding: 16px; }
+  .alerts { padding: 0 16px; }
   .steps, .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
   .span-2 { grid-column: auto; }
   .chain { grid-template-columns: 1fr; }
@@ -388,5 +420,8 @@ table.doc-sum tr.grand th, table.doc-sum tr.grand td { font-weight: 800; font-si
   .view { padding: 0; max-width: none; }
   .paper-scroll { overflow: visible; padding: 0; }
   .paper { width: auto; min-height: 0; margin: 0; padding: 0; box-shadow: none; }
+  .doc-set .paper + .paper { margin-top: 0; }
+  .paper.page-break { break-before: page; }
+  .paper[hidden] { display: none !important; }
   * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }

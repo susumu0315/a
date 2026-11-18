@@ -360,6 +360,24 @@ table.doc-sum th, table.doc-sum td { border: 1px solid #555; padding: 1.4mm 2.5m
 table.doc-sum th { background: #eef1f5; text-align: left; font-weight: 600; }
 table.doc-sum td { text-align: right; }
 table.doc-sum tr.grand th, table.doc-sum tr.grand td { font-weight: 800; font-size: 11.5pt; background: #e2e7ee; }
+.doc-set .paper + .paper { margin-top: 24px; }
+.paper[hidden] { display: none; }
+.set-toggles label { cursor: pointer; }
+.set-toggles input { width: auto; margin: 0 4px 0 0; }
+/* 領収書 */
+.rc-amount {
+  display: flex; align-items: baseline; justify-content: center; gap: 6mm; margin: 6mm auto 4mm; width: 130mm;
+  border-bottom: 3px double #111; padding-bottom: 2mm;
+}
+.rc-amount span { font-weight: 700; font-size: 12pt; }
+.rc-amount b { font-size: 24pt; letter-spacing: .05em; }
+.rc-for { text-align: center; margin: 0 0 8mm; line-height: 2; }
+.rc-bottom { display: flex; justify-content: space-between; align-items: flex-start; gap: 6mm; }
+.rc-from { display: flex; flex-direction: column; gap: 3mm; min-width: 70mm; }
+.revenue-stamp {
+  width: 24mm; height: 28mm; border: 1px dashed #555; display: grid; place-items: center;
+  text-align: center; font-size: 9pt; color: #555;
+}
 .receipt { display: flex; justify-content: flex-end; margin-top: 6mm; }
 .receipt-box { border: 1px solid #555; display: flex; font-size: 9pt; }
 .receipt-box > div:first-child { writing-mode: vertical-rl; background: #eef1f5; border-right: 1px solid #555; padding: 2mm 1mm; letter-spacing: .3em; }
@@ -368,6 +386,19 @@ table.doc-sum tr.grand th, table.doc-sum tr.grand td { font-weight: 800; font-si
 
 /* ---------- responsive ---------- */
 .tiles.tiles-3 { grid-template-columns: repeat(3, 1fr); }
+/* 納期の警告 */
+.alerts { padding: 0 24px; max-width: 1280px; width: 100%; }
+.alert-bar {
+  margin-top: 16px; background: #fdecec; border: 1px solid #f3b4b4; border-left: 5px solid var(--danger);
+  border-radius: var(--radius); padding: 10px 14px; color: var(--danger);
+}
+.alert-bar summary { cursor: pointer; font-weight: 600; }
+.alert-bar summary .muted { font-weight: 400; margin-left: 6px; font-size: .85rem; }
+.alert-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.alert-list a { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; color: var(--text); padding: 6px 8px; border-radius: 8px; background: #fff; }
+.alert-list a:hover { text-decoration: none; background: var(--primary-soft); }
+.alert-dialog { max-width: 760px; }
+.alert-dialog h2 { color: var(--danger); }
 @media (max-width: 1000px) {
   .tiles, .tiles.tiles-3 { grid-template-columns: repeat(2, 1fr); }
   dl.info { grid-template-columns: repeat(2, 1fr); }
@@ -381,6 +412,7 @@ table.doc-sum tr.grand th, table.doc-sum tr.grand td { font-weight: 800; font-si
   .nav-step { display: none; }
   .topbar { padding: 10px 16px; position: static; }
   .view { padding: 16px; }
+  .alerts { padding: 0 16px; }
   .steps, .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
   .span-2 { grid-column: auto; }
   .chain { grid-template-columns: 1fr; }
@@ -396,6 +428,9 @@ table.doc-sum tr.grand th, table.doc-sum tr.grand td { font-weight: 800; font-si
   .view { padding: 0; max-width: none; }
   .paper-scroll { overflow: visible; padding: 0; }
   .paper { width: auto; min-height: 0; margin: 0; padding: 0; box-shadow: none; }
+  .doc-set .paper + .paper { margin-top: 0; }
+  .paper.page-break { break-before: page; }
+  .paper[hidden] { display: none !important; }
   * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }
 </style>
@@ -429,6 +464,7 @@ table.doc-sum tr.grand th, table.doc-sum tr.grand td { font-weight: 800; font-si
         </form>
         <span id="sync" class="sync"></span>
       </header>
+      <div id="alerts" class="alerts no-print"></div>
       <main id="view" class="view"></main>
     </div>
   </div>
@@ -575,7 +611,10 @@ function defaultData() {
       showLogo: true,
       paymentTerms: '月末締め翌月末現金振込',
       taxRate: 10,
-      prefix: { order: 'JO', po: 'PO', dn: 'DN' },
+      prefix: { order: 'JO', po: 'PO', dn: 'DN', inv: 'IV', rc: 'RC' },
+      dueWarnDays: 3, // 納期まで何日以内で警告するか
+      bankAccount: '', // 請求書に印字する振込先
+      receiptFor: '防災用品代として', // 領収書の但し書き
     },
     partners: PARTNERS_DEFAULT.map(p => ({ id: uid(), ...p })),
     products: PRODUCTS_DEFAULT.map(p => ({ id: uid(), ...p })),
@@ -833,6 +872,82 @@ function orderStatus(o) {
 // 回答納期があればそれを、なければ希望納期を納期として扱う
 const dueOf = o => o.answerDate || o.dueDate || '';
 const billingBadge = b => (b ? `<span class="badge ${BILLING[b] || ''}">${esc(b)}</span>` : '<span class="muted">—</span>');
+const leftText = n => (n < 0 ? `${-n}日超過` : n === 0 ? '本日' : `あと${n}日`);
+
+// 納期が近い（または過ぎた）未完了の受注と、その受注のための発注書
+function dueAlerts() {
+  const days = toNum(db.settings.dueWarnDays);
+  const list = [];
+  const open = new Map(db.orders.map(o => [o.id, orderStatus(o).key !== 'done']));
+  db.orders.forEach(o => {
+    const due = dueOf(o);
+    if (!due || !open.get(o.id) || daysUntil(due) > days) return;
+    list.push({ kind: '受注', cls: 'is-order', no: o.orderNo, name: partnerName(o.customerId), what: itemsSummary(o.items), due, left: daysUntil(due), href: `#/orders/${o.id}` });
+  });
+  db.pos.forEach(p => {
+    if (!p.dueDate || !open.get(p.orderId) || daysUntil(p.dueDate) > days) return;
+    list.push({ kind: '発注書', cls: 'is-po', no: p.poNo, name: partnerName(p.supplierId), what: '仕入先からの納期', due: p.dueDate, left: daysUntil(p.dueDate), href: `#/pos/${p.id}` });
+  });
+  return list.sort((a, b) => a.left - b.left);
+}
+
+function dueAlertsListHTML(list) {
+  return `<ul class="alert-list">${list.map(x => `<li><a href="${x.href}">
+    <span class="badge ${x.left < 0 ? 'st-ng' : 'st-new'}">${x.left < 0 ? '超過' : '間近'}</span>
+    <span class="muted">${x.kind}</span> ${tag(x.no, x.cls)} <b>${esc(x.name)}</b> <span class="muted">${esc(x.what)}</span>
+    <span class="due-soon">${esc(x.due)}（${leftText(x.left)}）</span></a></li>`).join('')}</ul>`;
+}
+
+// 画面上部の警告（どの画面にも表示）
+let alertOpen = false;
+function renderAlerts() {
+  const el = $('#alerts');
+  if (!el) return;
+  const list = dueAlerts();
+  const over = list.filter(x => x.left < 0).length;
+  el.innerHTML = list.length ? `<details class="alert-bar" ${alertOpen ? 'open' : ''}>
+    <summary>⚠ 納期が近い・過ぎている案件が <b>${list.length} 件</b> あります${over ? `（うち <b>${over} 件は納期超過</b>）` : ''}
+      <span class="muted">納期まで ${num(db.settings.dueWarnDays)} 日以内 ／ 押すと一覧を表示</span></summary>
+    ${dueAlertsListHTML(list)}</details>` : '';
+  $('details', el)?.addEventListener('toggle', e => { alertOpen = e.target.open; });
+}
+
+// 起動したときに 1 日 1 回、納期の警告をポップアップで表示する
+function popupAlerts() {
+  const list = dueAlerts();
+  if (!list.length) return;
+  const key = 'resqmej-due-alert-' + today();
+  try {
+    if (sessionStorage.getItem(key)) return;
+    sessionStorage.setItem(key, '1');
+  } catch (e) { /* 保存できない環境では毎回表示する */ }
+  const dlg = document.createElement('dialog');
+  dlg.className = 'dialog alert-dialog';
+  dlg.innerHTML = `<h2>⚠ 納期の確認</h2>
+    <p>納期が近い（${num(db.settings.dueWarnDays)} 日以内）、または過ぎている案件が <b>${list.length} 件</b> あります。</p>
+    ${dueAlertsListHTML(list)}
+    <div class="dialog-actions"><button class="btn btn-primary" type="button">確認しました</button></div>`;
+  document.body.appendChild(dlg);
+  dlg.addEventListener('click', e => { if (e.target.closest('a, button')) dlg.close(); });
+  dlg.addEventListener('close', () => dlg.remove());
+  dlg.showModal();
+}
+
+// 請求書・領収書は納品書 1 件ごとに発行する。番号は納品書の番号の頭文字を変えたもの（DN-2026-0001 → IV-2026-0001）
+function relatedNo(d, kind) {
+  const m = /^[^-]+-(.+)$/.exec(d.dnNo || '');
+  return `${db.settings.prefix[kind]}-${m ? m[1] : d.dnNo}`;
+}
+function endOfNextMonth(s) {
+  if (!s) return '';
+  const d = new Date(s + 'T00:00:00');
+  return ymd(new Date(d.getFullYear(), d.getMonth() + 2, 0));
+}
+const invoiceInfo = d => {
+  const date = d.invoiceDate || d.deliveryDate;
+  return { no: relatedNo(d, 'inv'), date, payDue: d.payDue || endOfNextMonth(date) };
+};
+const receiptInfo = d => ({ no: relatedNo(d, 'rc'), date: d.receiptDate || d.deliveryDate, for: d.receiptFor || db.settings.receiptFor });
 
 // 色別在庫：現在庫＝期首在庫＋入庫累計－出荷済（納品書）／有効在庫＝現在庫－引当（受注のうち未納品の数量）
 function stockRows(excludeDnId) {
@@ -922,6 +1037,7 @@ const routes = [
   [/^\/deliveries$/, () => viewDocList('dn')],
   [/^\/deliveries\/new$/, (m, q) => viewDnForm(null, q.get('order'))],
   [/^\/deliveries\/([^/]+)\/edit$/, m => viewDnForm(m[1])],
+  [/^\/deliveries\/([^/]+)\/set$/, m => viewDocSet(m[1])],
   [/^\/deliveries\/([^/]+)$/, m => viewDocDetail('dn', m[1])],
   [/^\/partners$/, viewPartners],
   [/^\/partners\/([^/]+)$/, m => viewPartnerDetail(m[1])],
@@ -944,6 +1060,7 @@ function route() {
     const m = path.match(re);
     if (m) {
       fn(m, q);
+      renderAlerts();
       window.scrollTo(0, 0);
       return;
     }
@@ -1223,7 +1340,8 @@ function viewDashboard() {
   const ym = today().slice(0, 7);
   const month = db.orders.filter(o => (o.orderDate || '').startsWith(ym));
   const monthTotal = month.reduce((s, o) => s + calc(o).total, 0);
-  const soon = open.filter(x => dueOf(x.o) && daysUntil(dueOf(x.o)) <= 7)
+  const days = toNum(db.settings.dueWarnDays);
+  const soon = open.filter(x => dueOf(x.o) && daysUntil(dueOf(x.o)) <= days)
     .sort((a, b) => dueOf(a.o).localeCompare(dueOf(b.o)));
   const lowStock = stockRows().filter(r => r.judge !== 'OK');
   const unbilled = sts.filter(x => x.st.key === 'done' && (x.o.billing || '未処理') === '未処理');
@@ -1249,7 +1367,7 @@ function viewDashboard() {
       <a class="tile" href="#/orders"><div class="tile-label">今月の受注</div><div class="tile-value">${month.length} 件</div><div class="tile-sub">${yen(monthTotal)}（税込）</div></a>
       <a class="tile ${noPo.length ? 'is-alert' : ''}" href="#/orders?status=new"><div class="tile-label">未発注の受注</div><div class="tile-value">${noPo.length} 件</div><div class="tile-sub">発注書がまだの受注</div></a>
       <a class="tile" href="#/orders?status=open"><div class="tile-label">未納品の受注</div><div class="tile-value">${open.length} 件</div><div class="tile-sub">納品が完了していない受注</div></a>
-      <a class="tile ${soon.length ? 'is-alert' : ''}" href="#/orders?status=open"><div class="tile-label">納期 7 日以内</div><div class="tile-value">${soon.length} 件</div><div class="tile-sub">納期超過を含む</div></a>
+      <a class="tile ${soon.length ? 'is-alert' : ''}" href="#/orders?status=open"><div class="tile-label">納期 ${num(days)} 日以内</div><div class="tile-value">${soon.length} 件</div><div class="tile-sub">納期超過を含む</div></a>
       <a class="tile ${lowStock.length ? 'is-alert' : ''}" href="#/stock"><div class="tile-label">要発注・在庫不足の色</div><div class="tile-value">${lowStock.length} 色</div>
         <div class="tile-sub">${lowStock.length ? lowStock.map(r => esc(r.color)).join('・') : '在庫は足りています'}</div></a>
       <a class="tile ${unbilled.length ? 'is-alert' : ''}" href="#/orders?status=done&billing=未処理"><div class="tile-label">請求書が未処理</div><div class="tile-value">${unbilled.length} 件</div><div class="tile-sub">納品完了の受注のうち</div></a>
@@ -1272,8 +1390,8 @@ function dueHTML(o, st) {
   const due = dueOf(o);
   if (!due) return '<span class="muted">—</span>';
   const d = daysUntil(due);
-  const warn = st.key !== 'done' && d <= 3;
-  return `<span class="${warn ? 'due-soon' : ''}">${esc(due)}${warn ? (d < 0 ? '（超過）' : d === 0 ? '（本日）' : `（あと${d}日）`) : ''}</span>`;
+  const warn = st.key !== 'done' && d <= toNum(db.settings.dueWarnDays);
+  return `<span class="${warn ? 'due-soon' : ''}">${warn ? '⚠ ' : ''}${esc(due)}${warn ? `（${leftText(d)}）` : ''}</span>`;
 }
 
 // 明細の品名・色・数量を一覧用に短くまとめる
@@ -1517,9 +1635,10 @@ function docTableHTML(type, docs) {
             <td>${tag(d[T.noField], T.cls)}</td><td class="nowrap">${esc(d[T.dateField])}</td><td class="wide">${partnerLink(pid)}</td>
             <td>${o ? `<a href="#/orders/${o.id}">${tag(o.orderNo, 'is-order')}</a>` : '<span class="muted">紐付けなし</span>'}</td>
             <td>${tag(o?.customerPoNo, 'is-cust')}</td><td>${esc(d.subject)}</td>
-            ${isPo ? `<td class="nowrap">${esc(d.dueDate) || '—'}</td>` : ''}
+            ${isPo ? `<td class="nowrap">${d.dueDate && o ? dueHTML({ dueDate: d.dueDate }, orderStatus(o)) : esc(d.dueDate) || '—'}</td>` : ''}
             <td class="num">${yen(calc(d).total)}</td>
-            <td><a class="btn btn-sm" href="#/${T.path}/${d.id}">表示・印刷</a></td></tr>`;
+            <td><span class="actions"><a class="btn btn-sm" href="#/${T.path}/${d.id}">表示・印刷</a>
+              ${isPo ? '' : `<a class="btn btn-sm" href="#/deliveries/${d.id}/set">請求書・領収書</a>`}</span></td></tr>`;
         }).join('')}</tbody></table></div>`;
 }
 
@@ -1555,6 +1674,7 @@ function viewDocDetail(type, id) {
         <h1>${T.label} ${tag(no, T.cls)}</h1></div>
       <div class="actions">
         <button class="btn btn-print" data-act="print">🖨 PDFで印刷・保存</button>
+        ${type === 'dn' ? `<a class="btn btn-primary" href="#/deliveries/${d.id}/set">📄 請求書・領収書も表示</a>` : ''}
         <a class="btn" href="#/${T.path}/${d.id}/edit">✎ 編集</a>
         <button class="btn btn-danger" data-act="delete">削除</button>
       </div>
@@ -1589,16 +1709,135 @@ function printDoc(filename) {
   window.print();
 }
 
+// 納品書・請求書・領収書を 1 画面にまとめて表示・印刷（1 書類 = A4 1 枚）
+const SET_DOCS = [['dn', '納品書'], ['inv', '請求書'], ['rc', '領収書']];
+let setShown = { dn: true, inv: true, rc: true };
+
+function viewDocSet(id) {
+  const d = getDn(id);
+  if (!d) return notFound();
+  const o = getOrder(d.orderId);
+  const inv = invoiceInfo(d);
+  const rc = receiptInfo(d);
+  render(`
+    <div class="page-head no-print">
+      <div><div class="crumb"><a href="#/deliveries">納品書一覧</a> › <a href="#/deliveries/${d.id}">${esc(d.dnNo)}</a> › 請求書・領収書</div>
+        <h1>納品書・請求書・領収書 ${tag(d.dnNo, 'is-dn')}</h1></div>
+      <div class="actions">
+        <button class="btn btn-print" data-act="print">🖨 まとめてPDFで印刷・保存</button>
+        ${o ? `<a class="btn" href="#/orders/${o.id}">受注を開く</a>` : ''}
+      </div>
+    </div>
+    <section class="card no-print">
+      <h2>表示・印刷する書類</h2>
+      <div class="actions set-toggles">${SET_DOCS.map(([k, label]) =>
+        `<label class="btn"><input type="checkbox" data-show="${k}" ${setShown[k] ? 'checked' : ''}> ${label}</label>`).join('')}</div>
+      <div class="grid-4" style="margin-top:14px">
+        <div class="field"><label>請求日</label><input type="date" data-f="invoiceDate" value="${esc(inv.date)}"></div>
+        <div class="field"><label>お支払期限</label><input type="date" data-f="payDue" value="${esc(inv.payDue)}"></div>
+        <div class="field"><label>領収書の発行日</label><input type="date" data-f="receiptDate" value="${esc(rc.date)}"></div>
+        <div class="field"><label>領収書の但し書き</label><input data-f="receiptFor" value="${esc(rc.for)}"></div>
+      </div>
+      <p class="hint">請求日・領収書の発行日は納品日、お支払期限は請求日の翌月末が最初に入ります。変更はこの納品書に保存されます。
+        請求書No.・領収書No.は納品書No.に合わせて付きます（${esc(inv.no)} ／ ${esc(rc.no)}）。</p>
+      ${db.settings.bankAccount ? '' : '<p class="hint"><span class="over">⚠ 振込先が未登録です。</span> <a href="#/settings">設定画面</a>で登録すると請求書に印字されます。</p>'}
+      ${db.settings.company.invoiceNo ? '' : '<p class="hint"><span class="over">⚠ インボイス登録番号が未登録です。</span> <a href="#/settings">設定画面</a>で登録すると請求書・領収書に印字されます。</p>'}
+      <p class="hint">印刷画面で「PDFに保存」を選ぶと、選んだ書類が 1 つの PDF（1 書類 1 ページ）になります。</p>
+    </section>
+    <div class="paper-scroll doc-set">${SET_DOCS.map(([k]) =>
+      `<div class="paper" data-doc="${k}">${k === 'rc' ? receiptHTML(d) : docHTML(k, d)}</div>`).join('')}</div>`);
+
+  const applyShown = () => {
+    let first = true;
+    $$('.doc-set .paper').forEach(p => {
+      p.hidden = !setShown[p.dataset.doc];
+      p.classList.toggle('page-break', !p.hidden && !first); // 2 枚目以降は改ページ
+      if (!p.hidden) first = false;
+    });
+  };
+  applyShown();
+  $$('[data-show]').forEach(cb => cb.addEventListener('change', () => {
+    setShown[cb.dataset.show] = cb.checked;
+    applyShown();
+  }));
+  $$('input[data-f]').forEach(input => input.addEventListener('change', () => {
+    const v = input.value.trim();
+    if (v) d[input.dataset.f] = v;
+    else delete d[input.dataset.f]; // 空にしたら最初の値に戻す
+    save();
+    const y = window.scrollY;
+    viewDocSet(id);
+    window.scrollTo(0, y);
+  }));
+  $('[data-act=print]').addEventListener('click', () => {
+    const names = SET_DOCS.filter(([k]) => setShown[k]).map(([, label]) => label);
+    if (!names.length) return toast('印刷する書類を選んでください', 'error');
+    printDoc(`${names.join('・')}_${d.dnNo}`);
+    // 請求書を印刷したら、受注の請求書の状況を「発行済」にするか確認する
+    if (setShown.inv && o && (o.billing || '未処理') === '未処理' && confirm(`受注 ${o.orderNo} の請求書の状況を「発行済」にしますか？`)) {
+      o.billing = '発行済';
+      save();
+      toast('請求書の状況を「発行済」にしました');
+    }
+  });
+}
+
 // 印刷用の帳票（A4 縦）
+// 差出人（自社）欄
+function companyHTML() {
+  const c = db.settings.company;
+  return `<div class="company">
+    ${db.settings.showLogo ? `<img class="company-logo" src="${LOGO_SRC}" alt="${esc(c.name)}">` : `<div class="company-name">${esc(c.name || '（自社名未設定：設定画面で登録）')}</div>`}
+    ${c.dept ? `<div class="company-dept">${esc(c.dept)}</div>` : ''}
+    ${c.zip || c.address ? `<div>${c.zip ? '〒' + esc(c.zip) + '　' : ''}${esc(c.address)}</div>` : ''}
+    ${c.tel || c.fax ? `<div>${c.tel ? 'TEL ' + esc(c.tel) : ''}${c.fax ? '　FAX ' + esc(c.fax) : ''}</div>` : ''}
+    ${c.email ? `<div>${esc(c.email)}</div>` : ''}
+    ${c.invoiceNo ? `<div>登録番号：${esc(c.invoiceNo)}</div>` : ''}
+    ${c.person ? `<div>担当：${esc(c.person)}</div>` : ''}
+  </div>`;
+}
+
+// 領収書（納品書 1 件分）
+function receiptHTML(d) {
+  const o = getOrder(d.orderId);
+  const to = getPartner(o?.customerId);
+  const t = calc(d);
+  const rc = receiptInfo(d);
+  const meta = [['領収書No.', rc.no], ['発行日', fmtDate(rc.date)], ['納品書No.', d.dnNo], ['当社受注No.', o?.orderNo]];
+  return `
+    <h1 class="doc-title">領収書</h1>
+    <div class="doc-head">
+      <div class="doc-to">
+        <div class="to-name">${esc(to?.name || '（宛先未設定）')}<span>${esc(to?.honorific || '御中')}</span></div>
+      </div>
+      <div class="doc-from"><table class="doc-meta">${meta.map(([k, v]) => `<tr><th>${k}</th><td>${esc(v || '—')}</td></tr>`).join('')}</table></div>
+    </div>
+    <div class="rc-amount"><span>金額</span><b>${yen(t.total)}－</b><small>（税込）</small></div>
+    <p class="rc-for">但し　${esc(rc.for)}<br>上記正に領収いたしました。</p>
+    <div class="rc-bottom">
+      <table class="doc-sum">
+        <tr><th>税抜金額（${num(t.rate)}%対象）</th><td>${yen(t.sub)}</td></tr>
+        <tr><th>消費税額（${num(t.rate)}%）</th><td>${yen(t.tax)}</td></tr>
+        <tr class="grand"><th>合計</th><td>${yen(t.total)}</td></tr>
+      </table>
+      ${t.sub >= 50000 ? '<div class="revenue-stamp">収入<br>印紙</div>' : ''}
+      <div class="rc-from">${companyHTML()}<div class="stamps"><div class="stamp"><div>担当</div><div></div></div></div></div>
+    </div>`;
+}
+
 function docHTML(type, d) {
   const isPo = type === 'po';
-  const c = db.settings.company;
+  const isInv = type === 'inv';
   const o = d.orderId ? getOrder(d.orderId) : null;
   const to = getPartner(isPo ? d.supplierId : o?.customerId);
   const t = calc(d);
+  const inv = isInv ? invoiceInfo(d) : null;
+  const title = { po: '発注書', dn: '納品書', inv: '請求書' }[type];
   const meta = isPo
     ? [['発注No.', d.poNo], ['発注日', fmtDate(d.poDate)], ['納期', fmtDate(d.dueDate)], ['当社受注No.', o?.orderNo]]
-    : [['納品書No.', d.dnNo], ['納品日', fmtDate(d.deliveryDate)], ['貴社発注No.', o?.customerPoNo], ['当社受注No.', o?.orderNo]];
+    : isInv
+      ? [['請求書No.', inv.no], ['請求日', fmtDate(inv.date)], ['納品書No.', d.dnNo], ['貴社発注No.', o?.customerPoNo], ['当社受注No.', o?.orderNo]]
+      : [['納品書No.', d.dnNo], ['納品日', fmtDate(d.deliveryDate)], ['貴社発注No.', o?.customerPoNo], ['当社受注No.', o?.orderNo]];
   const MIN_ROWS = 10;
   const rows = d.items.map((it, i) => `<tr>
       <td class="c">${i + 1}</td>
@@ -1608,27 +1847,19 @@ function docHTML(type, d) {
   for (let i = rows.length; i < MIN_ROWS; i++) rows.push('<tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>');
 
   return `
-    <h1 class="doc-title">${isPo ? '発注書' : '納品書'}</h1>
+    <h1 class="doc-title">${title}</h1>
     <div class="doc-head">
       <div class="doc-to">
         <div class="to-name">${esc(to?.name || '（宛先未設定）')}<span>${esc(to?.honorific || '御中')}</span></div>
         ${to?.contact ? `<div class="to-sub">${esc(to.contact)}</div>` : ''}
         ${to?.zip || to?.address ? `<div class="to-sub">${to.zip ? '〒' + esc(to.zip) + '　' : ''}${esc(to.address)}</div>` : ''}
-        <p class="doc-lead">${isPo ? '下記の通り発注いたします。' : '下記の通り納品いたしました。ご査収ください。'}</p>
+        <p class="doc-lead">${isPo ? '下記の通り発注いたします。' : isInv ? '下記の通りご請求申し上げます。' : '下記の通り納品いたしました。ご査収ください。'}</p>
         ${d.subject ? `<div class="doc-subject"><span>件名</span><b>${esc(d.subject)}</b></div>` : ''}
-        <div class="doc-total"><span>${isPo ? 'ご発注金額' : '合計金額'}（税込）</span><b>${yen(t.total)}</b></div>
+        <div class="doc-total"><span>${isPo ? 'ご発注金額' : isInv ? 'ご請求金額' : '合計金額'}（税込）</span><b>${yen(t.total)}</b></div>
       </div>
       <div class="doc-from">
         <table class="doc-meta">${meta.map(([k, v]) => `<tr><th>${k}</th><td>${esc(v || '—')}</td></tr>`).join('')}</table>
-        <div class="company">
-          ${db.settings.showLogo ? `<img class="company-logo" src="${LOGO_SRC}" alt="${esc(c.name)}">` : `<div class="company-name">${esc(c.name || '（自社名未設定：設定画面で登録）')}</div>`}
-          ${c.dept ? `<div class="company-dept">${esc(c.dept)}</div>` : ''}
-          ${c.zip || c.address ? `<div>${c.zip ? '〒' + esc(c.zip) + '　' : ''}${esc(c.address)}</div>` : ''}
-          ${c.tel || c.fax ? `<div>${c.tel ? 'TEL ' + esc(c.tel) : ''}${c.fax ? '　FAX ' + esc(c.fax) : ''}</div>` : ''}
-          ${c.email ? `<div>${esc(c.email)}</div>` : ''}
-          ${c.invoiceNo ? `<div>登録番号：${esc(c.invoiceNo)}</div>` : ''}
-          ${c.person ? `<div>担当：${esc(c.person)}</div>` : ''}
-        </div>
+        ${companyHTML()}
         <div class="stamps">
           ${isPo ? '<div class="stamp"><div>承認</div><div></div></div>' : ''}
           <div class="stamp"><div>担当</div><div></div></div>
@@ -1645,15 +1876,18 @@ function docHTML(type, d) {
         ${isPo ? `<table class="doc-cond">
           <tr><th>納品場所</th><td>${esc(d.deliveryPlace) || '&nbsp;'}</td></tr>
           <tr><th>支払条件</th><td>${esc(d.paymentTerms) || '&nbsp;'}</td></tr></table>` : ''}
+        ${isInv ? `<table class="doc-cond">
+          <tr><th>お支払期限</th><td><b>${fmtDate(inv.payDue) || '&nbsp;'}</b></td></tr>
+          <tr><th>お振込先</th><td style="white-space:pre-wrap">${esc(db.settings.bankAccount) || '&nbsp;'}</td></tr></table>` : ''}
         <div class="note-box"><div class="note-label">備考</div><div class="note-body">${esc(d.note)}</div></div>
       </div>
       <table class="doc-sum">
-        <tr><th>小計</th><td>${yen(t.sub)}</td></tr>
+        <tr><th>小計${isInv ? `（${num(t.rate)}%対象）` : ''}</th><td>${yen(t.sub)}</td></tr>
         <tr><th>消費税（${num(t.rate)}%）</th><td>${yen(t.tax)}</td></tr>
         <tr class="grand"><th>合計</th><td>${yen(t.total)}</td></tr>
       </table>
     </div>
-    ${isPo ? '' : `<div class="receipt"><span class="receipt-msg">上記の通り受領いたしました。</span>
+    ${type !== 'dn' ? '' : `<div class="receipt"><span class="receipt-msg">上記の通り受領いたしました。</span>
       <div class="receipt-box"><div>受領印</div><div></div></div></div>`}`;
 }
 
@@ -2346,9 +2580,23 @@ function viewSettings() {
           <div class="field"><label>発注No.の頭文字</label><input name="p_po" value="${esc(s.prefix.po)}"></div>
           <div class="field"><label>納品書No.の頭文字</label><input name="p_dn" value="${esc(s.prefix.dn)}"></div>
           <div class="field"><label>標準の消費税率（%）</label><input type="number" name="taxRate" value="${esc(s.taxRate)}" min="0" step="any" class="num"></div>
+          <div class="field"><label>請求書No.の頭文字</label><input name="p_inv" value="${esc(s.prefix.inv)}"></div>
+          <div class="field"><label>領収書No.の頭文字</label><input name="p_rc" value="${esc(s.prefix.rc)}"></div>
           <div class="field span-2"><label>発注書の標準の支払条件</label><input name="paymentTerms" value="${esc(s.paymentTerms)}"></div>
         </div>
-        <p class="hint">番号は「頭文字-西暦-連番」の形で自動採番されます（例：${esc(s.prefix.order)}-${new Date().getFullYear()}-0001）。</p>
+        <p class="hint">番号は「頭文字-西暦-連番」の形で自動採番されます（例：${esc(s.prefix.order)}-${new Date().getFullYear()}-0001）。
+          請求書・領収書は納品書の番号の頭文字を変えたものになります（例：${esc(s.prefix.dn)}-${new Date().getFullYear()}-0001 → ${esc(s.prefix.inv)}-${new Date().getFullYear()}-0001）。</p>
+      </section>
+      <section class="card">
+        <h2>請求書・領収書・納期の警告</h2>
+        <div class="grid-2">
+          <div class="field"><label>お振込先 <span class="opt">（請求書に印字）</span></label>
+            <textarea name="bankAccount" placeholder="例：〇〇銀行 〇〇支店 普通 1234567 口座名義">${esc(s.bankAccount)}</textarea></div>
+          <div class="field"><label>領収書の但し書き（標準）</label><input name="receiptFor" value="${esc(s.receiptFor)}">
+            <p class="hint">書類ごとに変えることもできます。</p></div>
+          <div class="field"><label>納期の警告 <span class="opt">（納期まで何日以内で知らせるか）</span></label>
+            <input type="number" name="dueWarnDays" value="${esc(s.dueWarnDays)}" min="0" step="1" class="num" style="max-width:120px"></div>
+        </div>
       </section>
       <div class="form-actions"><button class="btn btn-primary" type="submit">設定を保存する</button></div>
     </form>
@@ -2369,14 +2617,18 @@ function viewSettings() {
   $('#settings-form').addEventListener('submit', e => {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target));
-    const prefixes = [f.p_order, f.p_po, f.p_dn].map(v => v.trim());
+    const prefixes = [f.p_order, f.p_po, f.p_dn, f.p_inv, f.p_rc].map(v => v.trim());
     if (prefixes.some(v => !/^[A-Za-z0-9]+$/.test(v))) return toast('番号の頭文字は半角英数字で入力してください', 'error');
     s.company = { name: f.name, dept: f.dept, zip: f.zip, address: f.address, tel: f.tel, fax: f.fax, email: f.email, invoiceNo: f.invoiceNo, person: f.person };
     s.showLogo = f.showLogo === 'on';
     s.paymentTerms = f.paymentTerms.trim();
-    s.prefix = { order: prefixes[0], po: prefixes[1], dn: prefixes[2] };
+    s.prefix = { order: prefixes[0], po: prefixes[1], dn: prefixes[2], inv: prefixes[3], rc: prefixes[4] };
     s.taxRate = toNum(f.taxRate);
+    s.bankAccount = f.bankAccount.trim();
+    s.receiptFor = f.receiptFor.trim();
+    s.dueWarnDays = toNum(f.dueWarnDays);
     save();
+    renderAlerts();
     toast('設定を保存しました');
   });
   $('[data-act=export]').addEventListener('click', () => {
@@ -2502,7 +2754,7 @@ window.addEventListener('hashchange', route);
 
 if (REMOTE) {
   render('<div class="card empty">データを読み込んでいます…</div>');
-  reload().then(route, err => {
+  reload().then(() => { route(); popupAlerts(); }, err => {
     render(`<div class="card empty">データを読み込めませんでした。<br>${esc(err.message || err)}<br><button class="btn" onclick="location.reload()">再読み込み</button></div>`);
   });
   setInterval(refreshIfIdle, 60000);
@@ -2510,6 +2762,7 @@ if (REMOTE) {
 } else {
   window.addEventListener('storage', e => { if (e.key === STORE_KEY) { db = load(); route(); } });
   route();
+  popupAlerts();
 }
 </script>
 </body>
