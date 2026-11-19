@@ -367,6 +367,14 @@ table.doc-sum tr.grand th, table.doc-sum tr.grand td { font-weight: 800; font-si
 }
 .reissue-stamp b { font-size: 20pt; }
 .reissue-stamp small { font-size: 7pt; font-weight: 700; }
+.no-tag.is-inv { background: #fdf2e3; color: #9a5b00; }
+table.doc-lines tr.grp td { background: #f3f5f8; font-weight: 700; font-size: 9pt; padding: 1mm 2mm; height: auto; }
+.rule-title { margin: 18px 0 8px; font-size: 1rem; border-top: 1px solid var(--line); padding-top: 14px; }
+.price-rows { display: flex; flex-direction: column; gap: 6px; }
+.price-row { display: flex; align-items: center; gap: 8px; font-weight: 400; }
+.price-row span { min-width: 9em; }
+.price-row input { max-width: 140px; }
+#partner-dialog { max-height: 92vh; overflow-y: auto; }
 .no-tag.is-draft { background: #eef1f5; color: var(--muted); }
 .no-tag.is-void { text-decoration: line-through; opacity: .7; }
 .re-mark {
