@@ -8,7 +8,10 @@
 - 色別在庫管理：期首在庫・発注点を取り込む。Excel の「入庫累計」（手入力の数字）は入庫記録 1 件として取り込み、
   アプリの在庫が Excel と同じ数字になるようにする。
 - 入庫記録シートの行は取り込まない（Excel の在庫計算に入っていないため）。
-- 単価は Excel にないので空欄のまま（金額は 0 円になる）。
+- 単価は Excel にないため、実際の請求書（2026年10月分）の単価を入れる：レスキューミー 1,250 円（相日防災は 1,200 円）、
+  レスキューミーホルダー 350 円。単価がわからない商品（しのげーる など）は空欄のまま。
+- 「能美防災㈱YAC六甲」のように拠点名が付いた会社は、取引先「能美防災株式会社」にまとめ、拠点名を受注の件名にする
+  （実際の請求書は能美防災株式会社あてで、拠点名を件名に書いているため）。
 """
 import collections
 import datetime
@@ -19,7 +22,10 @@ import sys
 
 import openpyxl
 
-PRODUCT_NAMES = {'ＲＱＭ': 'レスキューミー'}
+PRODUCT_NAMES = {'ＲＱＭ': 'レスキューミー', 'ＲＱＭホルダー': 'レスキューミーホルダー'}
+PRICES = {'レスキューミー': 1250, 'レスキューミーホルダー': 350}
+PARTNER_PRICES = {'相日防災株式会社': {'レスキューミー': 1200}}
+NOHMI = '能美防災株式会社'
 DEFAULT_PARTNERS = ['株式会社ボウエキ', '株式会社ジーエム', '相日防災株式会社', '株式会社三和製作所',
                     '株式会社ライズ', '久下小学校', 'くらし企画', 'SIAソリューション']
 
@@ -34,6 +40,13 @@ def ymd(v):
 
 def partner_name(v):
     return str(v).strip().replace('㈱', '株式会社')
+
+
+def split_branch(name):
+    """「能美防災株式会社YAC六甲」→（能美防災株式会社, YAC六甲）"""
+    if name.startswith(NOHMI) and len(name) > len(NOHMI):
+        return NOHMI, name[len(NOHMI):].strip()
+    return name, ''
 
 
 def product_name(v):
@@ -80,14 +93,17 @@ def main(src, dst):
         for r in g['rows']:
             name = product_name(r[3])
             if name not in products:
-                products[name] = {'id': uid(), 'name': name, 'unit': '個', 'price': 0, 'useColor': False}
-            items.append({'id': uid(), 'name': name, 'spec': (r[4] or '').strip(), 'qty': r[5] or 0, 'unit': '個', 'price': ''})
-        order = {'id': uid(), 'orderNo': f'JO-{odate[:4]}-{n:04d}', 'customerPoNo': '', 'customerId': partner(company),
+                products[name] = {'id': uid(), 'name': name, 'unit': '個', 'price': PRICES.get(name, 0), 'useColor': False}
+            cname, _ = split_branch(company)
+            price = PARTNER_PRICES.get(cname, {}).get(name, PRICES.get(name, ''))
+            items.append({'id': uid(), 'name': name, 'spec': (r[4] or '').strip(), 'qty': r[5] or 0, 'unit': '個', 'price': price})
+        cname, branch = split_branch(company)
+        order = {'id': uid(), 'orderNo': f'JO-{odate[:4]}-{n:04d}', 'customerPoNo': '', 'customerId': partner(cname),
                  'orderDate': odate, 'dueDate': due, 'answerDate': answer, 'staff': st, 'billing': billing or '未処理',
-                 'subject': '', 'taxRate': 10, 'items': items, 'note': note, 'importedFrom': 'Excel 受注管理表 No.' + ','.join(str(r[0]) for r in g['rows'])}
+                 'subject': branch, 'taxRate': 10, 'items': items, 'note': note, 'importedFrom': 'Excel 受注管理表 No.' + ','.join(str(r[0]) for r in g['rows'])}
         orders.append(order)
         if shipped:
-            deliveries.append({'id': uid(), 'orderId': order['id'], 'deliveryDate': shipped, 'subject': '', 'taxRate': 10, 'note': '',
+            deliveries.append({'id': uid(), 'orderId': order['id'], 'deliveryDate': shipped, 'subject': branch, 'taxRate': 10, 'note': '',
                                'items': [{**it, 'id': uid(), 'ref': it['id']} for it in items]})
     deliveries.sort(key=lambda d: d['deliveryDate'])
     for n, d in enumerate(deliveries, 1):

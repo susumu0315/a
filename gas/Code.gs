@@ -5,7 +5,7 @@
 
 const SHEETS = {
   config: '設定', partners: '取引先', products: '商品', orders: '受注', pos: '発注書',
-  deliveries: '納品書', receipts: '入庫', prospects: '見込み案件', logs: '操作履歴', bills: '請求書',
+  deliveries: '納品書', receipts: '入庫', prospects: '見込み案件', logs: '操作履歴', bills: '請求書', salesReports: '販売実績',
 };
 const HEADER = ['id', '内容', '更新日時', '更新者', 'rev', 'data'];
 const COL = { id: 0, label: 1, at: 2, by: 3, rev: 4, data: 5 };
@@ -14,8 +14,8 @@ const UNIQUE = { orders: ['orderNo', '自社受注No.'], pos: ['poNo', '発注No
 // 発行済・取消済の書類で変更してはいけない項目
 const LOCKED = {
   pos: ['poNo', 'orderId', 'supplierId', 'items', 'snap', 'issuedAt', 'issuedBy', 'reissueOf'],
-  deliveries: ['dnNo', 'orderId', 'deliveryDate', 'items', 'snap', 'issuedAt', 'issuedBy', 'reissueOf'],
-  bills: ['billNo', 'partnerId', 'dnIds', 'invoiceDate', 'payDue', 'subject', 'note', 'shipping', 'snap', 'issuedAt', 'issuedBy', 'reissueOf'],
+  deliveries: ['dnNo', 'orderId', 'deliveryDate', 'items', 'shipType', 'snap', 'issuedAt', 'issuedBy', 'reissueOf'],
+  bills: ['billNo', 'partnerId', 'dnIds', 'reportIds', 'invoiceDate', 'payDue', 'subject', 'note', 'shipping', 'snap', 'issuedAt', 'issuedBy', 'reissueOf'],
 };
 const VOID_FIELDS = ['status', 'voidAt', 'voidBy', 'voidReason'];
 

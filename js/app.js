@@ -66,9 +66,11 @@ function download(filename, content, mime) {
 // 自社情報の初期値（見積書雛形の差出人欄より）
 const COMPANY_DEFAULT = {
   name: 'ミカド電子株式会社', dept: '防災事業部', zip: '366-0052', address: '埼玉県深谷市上柴町西1-21-13',
-  tel: '048-573-6200', fax: '', email: '', invoiceNo: '', person: '',
+  tel: '048-573-6200', fax: '', email: '', invoiceNo: 'T3030001087782', person: '',
 };
 const SAMPLE_COMPANY_NAME = '株式会社サンプル商事';
+// 振込先（ミカド電子の請求書より）
+const BANK_DEFAULT = '埼玉りそな銀行　深谷支店（普通）4788510\n「ミカドデンシ（カ　ボウサイジギョウブ」';
 
 // 取引先の初期値（見積書雛形・防災品受注管理表より）
 const PARTNERS_DEFAULT = [
@@ -83,7 +85,7 @@ const STAFF_DEFAULT = ['瀬山', '小林', '小澤'];
 
 function defaultData() {
   return {
-    version: 7,
+    version: 8,
     settings: {
       company: { ...COMPANY_DEFAULT },
       showLogo: true,
@@ -91,7 +93,8 @@ function defaultData() {
       taxRate: 10,
       prefix: { order: 'JO', po: 'PO', dn: 'DN', inv: 'IV', rc: 'RC' },
       dueWarnDays: 3, // 納期まで何日以内で警告するか
-      bankAccount: '', // 請求書に印字する振込先
+      bankAccount: BANK_DEFAULT, // 請求書に印字する振込先
+      invoiceNote: '※振込手数料のご負担をお願いいたします。', // 請求書の振込先の下に印字する注記
       receiptFor: '防災用品代として', // 領収書の但し書き
       companyHolidays: '', // 会社の休業日（請求日を休日からずらすときに使う）
     },
@@ -107,6 +110,7 @@ function defaultData() {
     prospects: [], // 見込み案件
     logs: [], // 書類の発行・取消の操作履歴
     bills: [], // 請求書（1 件以上の納品書をまとめる）
+    salesReports: [], // 販売実績表の出荷実績（月・色ごと）
   };
 }
 
@@ -122,7 +126,14 @@ function normalize(d) {
     PARTNERS_DEFAULT.forEach(p => { if (!partners.some(x => x.name === p.name)) partners.push({ id: uid(), ...p }); });
   }
   // 請求書のルールがない取引先には、初期値（既存の取引先は要件定義書の条件）を設定する
-  partners.forEach(x => { if (!x.billing) x.billing = { ...ruleDefaults(), ...rulePreset(x.name) }; });
+  partners.forEach(x => {
+    if (!x.billing) x.billing = { ...ruleDefaults(), ...rulePreset(x.name) };
+    else if ((d.version || 1) < 8) x.billing = { ...x.billing, ...rulePresetV8(x.name) };
+  });
+  if ((d.version || 1) < 8) {
+    if (!company.invoiceNo) company.invoiceNo = COMPANY_DEFAULT.invoiceNo;
+    if (!s.bankAccount) s.bankAccount = BANK_DEFAULT;
+  }
   const colors = d.colors || def.colors;
   if ((d.version || 1) < 5 && !colors.includes('アソート')) colors.push('アソート');
   return {
@@ -157,7 +168,7 @@ let db = REMOTE ? defaultData() : load();
 
 // ---------- スプレッドシートとの同期（Apps Script 配信時のみ） ----------
 // レコードを持つ一覧と、1 件だけの設定値。スプレッドシートではそれぞれ 1 シートになる
-const COLLS = ['partners', 'products', 'orders', 'pos', 'deliveries', 'receipts', 'prospects', 'logs', 'bills'];
+const COLLS = ['partners', 'products', 'orders', 'pos', 'deliveries', 'receipts', 'prospects', 'logs', 'bills', 'salesReports'];
 const CONFIG_KEYS = ['version', 'settings', 'colors', 'staff', 'stock'];
 let synced = {}; // 最後にサーバーと一致していた内容 { 一覧: { id: JSON } }
 let revs = {}; // サーバー側の版 { 一覧: { id: rev } }。他の人の更新との衝突検知に使う
@@ -187,6 +198,7 @@ function recordLabel(coll, id, r) {
     case 'pos': return `${r.poNo || '下書き'}｜${DOC_STATE[stateOf(r)].label}｜${r.poDate}｜${partnerName(r.supplierId)}｜${items}`;
     case 'deliveries': return `${r.dnNo || '下書き'}｜${DOC_STATE[stateOf(r)].label}｜${r.deliveryDate}｜${partnerName(getOrder(r.orderId)?.customerId)}｜${items}`;
     case 'bills': return `${r.billNo || '下書き'}｜${DOC_STATE[stateOf(r)].label}｜${r.invoiceDate}｜${partnerName(r.partnerId)}｜納品書 ${r.dnIds.length} 件`;
+    case 'salesReports': return `${r.month}｜${partnerName(r.partnerId)}｜${r.color}｜出荷実績 ${r.shipped}`;
     case 'logs': return `${r.at}｜${r.action}｜${DOC_TITLE[r.docType] || ''} ${r.no}｜${r.by}${r.reason ? '｜' + r.reason : ''}`;
     case 'receipts': return `${r.date}｜${r.color}｜${r.qty}`;
     case 'prospects': return `${r.date}｜${r.company}｜${r.product}｜${r.color || ''}×${r.qty}`;
@@ -1171,7 +1183,7 @@ function buildModel(type, d) {
   } else {
     m.no = d.dnNo;
     m.meta = [['納品書No.', d.dnNo || PENDING], ['納品日', fmtDate(d.deliveryDate)], ['貴社発注No.', o?.customerPoNo], ['当社受注No.', o?.orderNo]];
-    m.dest = d.destination || '';
+    m.dest = [d.shipType === 'stock' ? '貴社在庫への補充分' : '', d.destination || ''].filter(Boolean).join('　');
   }
   const from = d.reissueOf ? getDoc(type, d.reissueOf)?.[DOC[type].noField] : '';
   if (from) {
@@ -1294,7 +1306,7 @@ function askReason(what) {
 const voidFields = reason => ({ status: 'void', voidAt: nowIso(), voidBy: currentUser, voidReason: reason });
 
 function billIssueError(b) {
-  if (!b.dnIds.length) return '請求書に納品書が含まれていません';
+  if (!b.dnIds.length && !(b.reportIds || []).length) return '請求書に納品書・出荷実績が含まれていません';
   if (b.dnIds.some(id => stateOf(getDn(id) || {}) !== 'issued')) return '取消・未発行の納品書が含まれています';
   if (b.dnIds.some(id => getDn(id).items.some(it => toNum(it.qty) && it.price === ''))) {
     return '単価が入っていない納品書があります。その納品書を「取消」して単価を入れて再発行してから、請求書を作り直してください';
@@ -1346,7 +1358,8 @@ function reissueDoc(type, d) {
   Object.assign(copy, { id: uid(), [T.noField]: '', status: 'draft', reissueOf: d.id, version: (d.version || 1) + 1, createdAt: nowIso(), updatedAt: nowIso() });
   if (type === 'bill') {
     copy.dnIds = copy.dnIds.filter(id => stateOf(getDn(id) || {}) === 'issued' && !liveBillOfDn(id));
-    if (!copy.dnIds.length) return toast('再発行できる納品書がありません（納品書が取消されています）', 'error');
+    copy.reportIds = (copy.reportIds || []).filter(id => db.salesReports.some(r => r.id === id) && !billOfReport(id));
+    if (!copy.dnIds.length && !copy.reportIds.length) return toast('再発行できる納品書がありません（納品書が取消されています）', 'error');
     delete copy.receiptDate;
   }
   T.list().push(copy);
@@ -1527,22 +1540,35 @@ const RULE_OPTIONS = {
   subject: { optional: '任意', required: '必須（空欄では発行できない）' },
   noteDest: { off: '書かない', on: '納品ごとの送付先を書く' },
   zero: { keep: '残す', drop: '除く' },
+  qtySource: { delivery: '納品書の数量', salesReport: '販売実績表（直送分＋先方の出荷実績。在庫補充分は除く）' },
 };
 const CLOSING_DAYS = [...Array.from({ length: 28 }, (_, i) => i + 1), 31]; // 31 = 末日
 const closingLabel = d => (+d === 31 ? '末日' : `${d}日`);
 // 起動時の移行（normalize）からも使うため function で定義する
 function ruleDefaults() {
   return { unit: 'delivery', closingDay: 31, holiday: 'none', payTerm: 'nextEnd', grouping: 'none',
-    shipping: 0, subject: 'optional', noteDest: 'off', zero: 'keep', prices: {} };
+    shipping: 0, subject: 'optional', noteDest: 'off', zero: 'keep', qtySource: 'delivery', prices: {} };
 }
 
 // 既存の取引先の初期設定（発注書・請求書・領収書 発行システム 要件定義書「取引先別の請求書ルール」より）
 function rulePreset(name) {
+  return { ...rulePresetV7(name), ...rulePresetV8(name) };
+}
+function rulePresetV7(name) {
   if (name === '相日防災株式会社') return { unit: 'monthly', closingDay: 20, holiday: 'before', prices: { レスキューミー: 1200 } };
   if (name === 'くらし企画') return { grouping: 'customerPo' };
   if (name.includes('ボウエキ')) return { noteDest: 'on' };
   if (name === '株式会社ジーエム') return { zero: 'drop' };
   if (name.startsWith('能美防災')) return { unit: 'order', shipping: 1000, subject: 'required' };
+  return {};
+}
+// 実際の請求書（2026年10月分）に合わせた追加：月末締め（10/30 発行）、発注No.ごと、ジーエムは販売実績表で集計
+function rulePresetV8(name) {
+  const monthEnd = { unit: 'monthly', closingDay: 31, holiday: 'before' };
+  if (name === '相日防災株式会社') return { grouping: 'customerPo' };
+  if (name === 'くらし企画') return monthEnd;
+  if (name.includes('ボウエキ')) return monthEnd;
+  if (name === '株式会社ジーエム') return { ...monthEnd, qtySource: 'salesReport' };
   return {};
 }
 const ruleOf = p => ({ ...ruleDefaults(), ...(p?.billing || {}), prices: { ...(p?.billing?.prices || {}) } });
@@ -1558,6 +1584,7 @@ function ruleSummary(p) {
   if (r.subject === 'required') parts.push('件名必須');
   if (r.noteDest === 'on') parts.push('備考に送付先');
   if (r.zero === 'drop') parts.push('数量0を除く');
+  if (r.qtySource === 'salesReport') parts.push('販売実績表で集計');
   return parts.join('／');
 }
 
@@ -1583,6 +1610,7 @@ function ruleFieldsHTML(p) {
         <input name="r_shipping" type="number" min="0" step="1" class="num" value="${toNum(r.shipping) || ''}" placeholder="金額（円）" data-ship-amount></div></div>
     <div class="field"><label>備考欄</label>${sel('r_noteDest', RULE_OPTIONS.noteDest, r.noteDest)}</div>
     <div class="field"><label>数量 0 の行</label>${sel('r_zero', RULE_OPTIONS.zero, r.zero)}</div>
+    <div class="field span-2"><label>請求する数量</label>${sel('r_qtySource', RULE_OPTIONS.qtySource, r.qtySource)}</div>
     <div class="field span-2"><label>この取引先の単価 <span class="opt">（空欄なら標準単価）</span></label>
       <div class="price-rows">${db.products.map(pr => `<label class="price-row"><span>${esc(pr.name)}</span>
         <input type="number" min="0" step="any" class="num" data-price="${esc(pr.name)}" value="${r.prices[pr.name] ?? ''}" placeholder="標準 ${num(pr.price)}"> 円</label>`).join('')}</div></div>`;
@@ -1602,7 +1630,8 @@ function readRuleFields(root, f) {
   const prices = {};
   $$('[data-price]', root).forEach(i => { if (i.value !== '') prices[i.dataset.price] = toNum(i.value); });
   return { unit: f.r_unit, closingDay: +f.r_closingDay, holiday: f.r_holiday, payTerm: f.r_payTerm, grouping: f.r_grouping,
-    shipping: f.r_shipOn === 'on' ? toNum(f.r_shipping) : 0, subject: f.r_subject, noteDest: f.r_noteDest, zero: f.r_zero, prices };
+    shipping: f.r_shipOn === 'on' ? toNum(f.r_shipping) : 0, subject: f.r_subject, noteDest: f.r_noteDest, zero: f.r_zero,
+    qtySource: f.r_qtySource, prices };
 }
 
 // ---------- 祝日・休業日と日付の計算 ----------
@@ -1662,6 +1691,166 @@ function payDueOf(base, term) {
 }
 const shortDate = s => (s ? `${+s.slice(5, 7)}/${+s.slice(8, 10)}` : '');
 
+// ---------- 販売実績表（先方の在庫から出荷した数で請求する取引先：ジーエムなど） ----------
+// 先方の在庫に補充した分（納品の区分「在庫補充」）は請求せず、先方が出荷した数（出荷実績）を月ごとに請求する
+const usesSalesReport = p => ruleOf(p).qtySource === 'salesReport';
+const SHIP_TYPES = { direct: '直送（請求する）', stock: '先方への在庫補充（請求しない。出荷実績で請求）' };
+const reportsOf = partnerId => db.salesReports.filter(r => r.partnerId === partnerId);
+const billOfReport = id => db.bills.find(b => isLive(b) && (b.reportIds || []).includes(id));
+const monthLabel = m => `${m.slice(0, 4)}年${+m.slice(5, 7)}月`;
+// 販売実績表の色名をアプリの色名にそろえる
+const REPORT_COLOR = { ネオンイエロー: 'イエロー', ライトブルー: 'ブルー', 色おまかせ: 'アソート' };
+const reportColor = c => REPORT_COLOR[String(c).trim()] || String(c).trim();
+
+// アプリの納品書から、月・色ごとの直送分と在庫補充分を集計（販売実績表との照合用）
+function shippedByMonth(partnerId) {
+  const out = {};
+  db.deliveries.filter(d => stateOf(d) === 'issued' && getOrder(d.orderId)?.customerId === partnerId).forEach(d => {
+    const m = String(d.deliveryDate).slice(0, 7);
+    d.items.forEach(it => {
+      if (!it.spec) return;
+      const k = `${m}|${it.spec}`;
+      out[k] = out[k] || { direct: 0, stock: 0 };
+      out[k][d.shipType === 'stock' ? 'stock' : 'direct'] += toNum(it.qty);
+    });
+  });
+  return out;
+}
+
+// SheetJS を必要なときだけ読み込む
+let xlsxLoading;
+function loadXlsx() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  xlsxLoading = xlsxLoading || new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    s.onload = () => resolve(window.XLSX);
+    s.onerror = () => { xlsxLoading = null; reject(new Error('Excel を読み込む部品を取得できませんでした（インターネット接続を確認してください）')); };
+    document.head.appendChild(s);
+  });
+  return xlsxLoading;
+}
+
+// 販売実績表（色ごとに「出荷実績」「在庫補充」「直送依頼分」の行、月ごとの列）を読み取る
+function parseSalesReport(rows) {
+  let fy = 0;
+  const cols = [];
+  rows.some(r => {
+    const y = r.findIndex(v => /年度/.test(String(v ?? '')));
+    if (y < 0) return false;
+    fy = parseInt(String(r[y]), 10);
+    r.forEach((v, i) => { const m = /^(\d{1,2})月$/.exec(String(v ?? '').trim()); if (m) cols.push({ i, m: +m[1] }); });
+    return true;
+  });
+  if (!fy || !cols.length) throw new Error('「〇〇年度」と「〇月」の見出しが見つかりません。販売実績表のファイルか確認してください');
+  const first = cols[0].m;
+  const months = cols.map(c => ({ ...c, key: `${c.m >= first ? fy : fy + 1}-${String(c.m).padStart(2, '0')}` }));
+  // 同じ月が 2 回ある場合（翌年の同じ月）は 2 回目を翌年にする
+  const seen = new Set();
+  months.forEach(c => { if (seen.has(c.key)) c.key = `${+c.key.slice(0, 4) + 1}${c.key.slice(4)}`; seen.add(c.key); });
+  const data = {};
+  let color = '';
+  rows.forEach(r => {
+    const a = String(r[0] ?? '').trim();
+    const b = String(r[1] ?? '').trim();
+    if (a && !b && !/^total$/i.test(a) && !/単価/.test(a)) { color = reportColor(a); return; }
+    const field = /出荷実績/.test(b) ? 'shipped' : /直送/.test(b) ? 'direct' : /補充/.test(b) && !/前月/.test(b) ? 'replenish' : '';
+    if (!color || !field) return;
+    months.forEach(c => {
+      const v = r[c.i];
+      if (typeof v !== 'number') return;
+      const k = `${c.key}|${color}`;
+      data[k] = data[k] || { month: c.key, color, shipped: 0, direct: 0, replenish: 0 };
+      data[k][field] = v;
+    });
+  });
+  return Object.values(data).filter(x => x.shipped || x.direct || x.replenish).sort((x, y) => x.month.localeCompare(y.month) || x.color.localeCompare(y.color, 'ja'));
+}
+
+function upsertReport(p, rec) {
+  const cur = db.salesReports.find(r => r.partnerId === p.id && r.month === rec.month && r.color === rec.color);
+  if (cur && billOfReport(cur.id)) return 'billed';
+  if (cur) Object.assign(cur, rec, { updatedAt: nowIso() });
+  else db.salesReports.push({ id: uid(), partnerId: p.id, product: db.products[0]?.name || 'レスキューミー', ...rec, createdAt: nowIso() });
+  return cur ? 'updated' : 'added';
+}
+
+function salesReportHTML(p) {
+  const list = [...reportsOf(p.id)].sort((a, b) => b.month.localeCompare(a.month) || a.color.localeCompare(b.color, 'ja'));
+  const app = shippedByMonth(p.id);
+  return `<section class="card">
+    <h2>販売実績（先方の在庫からの出荷実績）</h2>
+    <p class="hint" style="margin:-6px 0 10px">この取引先は「販売実績表」で請求します。請求する数 ＝ 直送分（納品の区分「直送」の納品書）＋ 先方の出荷実績。先方への在庫補充分は請求しません。
+      毎月の販売実績表を読み込むか、出荷実績を入力してください。締め日の請求書に自動で入ります。</p>
+    <div class="actions" style="margin-bottom:12px">
+      <label class="btn btn-primary">⬆ 販売実績表（Excel）を読み込む<input type="file" accept=".xls,.xlsx" data-act="report-file" hidden></label>
+    </div>
+    <form id="report-form" class="grid-4" autocomplete="off">
+      <div class="field"><label>月</label><input type="month" name="month" value="${today().slice(0, 7)}"></div>
+      <div class="field"><label>色</label><select name="color">${colorOptions('')}</select></div>
+      <div class="field"><label>出荷実績（先方の在庫から）</label><input type="number" name="shipped" min="0" step="1" class="num"></div>
+      <div class="field"><label>&nbsp;</label><button class="btn" type="submit">＋ 出荷実績を入力</button></div>
+    </form>
+    ${list.length ? `<div class="table-wrap" style="margin-top:12px"><table class="list">
+      <thead><tr><th>月</th><th>色</th><th class="num">出荷実績</th><th class="num">直送依頼分（表）</th><th class="num">直送（納品書）</th>
+        <th class="num">在庫補充（表）</th><th class="num">在庫補充（納品書）</th><th>請求書</th><th></th></tr></thead>
+      <tbody>${list.map(r => {
+        const a = app[`${r.month}|${r.color}`] || { direct: 0, stock: 0 };
+        const b = billOfReport(r.id);
+        const diff = (x, y) => (x !== y ? ` <span class="over" title="販売実績表と納品書の数が違います">⚠</span>` : '');
+        return `<tr><td class="nowrap">${monthLabel(r.month)}</td><td>${esc(r.color)}</td><td class="num"><b>${num(r.shipped)}</b></td>
+          <td class="num">${num(r.direct)}</td><td class="num">${num(a.direct)}${diff(toNum(r.direct), a.direct)}</td>
+          <td class="num">${num(r.replenish)}</td><td class="num">${num(a.stock)}${diff(toNum(r.replenish), a.stock)}</td>
+          <td class="nowrap">${b ? `<a href="#/bills/${b.id}">${b.billNo ? tag(b.billNo, 'is-inv') : '下書き'}</a>` : '<span class="muted">未請求</span>'}</td>
+          <td>${b ? '' : `<button class="btn btn-sm btn-danger" data-del-report="${r.id}">削除</button>`}</td></tr>`;
+      }).join('')}</tbody></table></div>
+      <p class="hint">⚠ は販売実績表の数と、アプリの納品書（直送・在庫補充）の数が違う月・色です。納品書の「納品の区分」を確認してください。</p>` : ''}
+  </section>`;
+}
+
+function bindSalesReport(p, rerender) {
+  $('#report-form')?.addEventListener('submit', e => {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(e.target));
+    if (!f.month || !f.color) return toast('月と色を選んでください', 'error');
+    const cur = db.salesReports.find(r => r.partnerId === p.id && r.month === f.month && r.color === f.color);
+    const res = upsertReport(p, { month: f.month, color: f.color, shipped: toNum(f.shipped), direct: cur?.direct || 0, replenish: cur?.replenish || 0 });
+    if (res === 'billed') return toast('この月・色はすでに請求書に入っているため変更できません', 'error');
+    save();
+    toast('出荷実績を保存しました');
+    rerender();
+  });
+  $('[data-act=report-file]')?.addEventListener('change', async e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const XLSX = await loadXlsx();
+      const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true });
+      const recs = parseSalesReport(rows);
+      if (!recs.length) throw new Error('読み取れる数字がありませんでした');
+      const unknown = [...new Set(recs.map(r => r.color).filter(c => !db.colors.includes(c)))];
+      const preview = recs.map(r => `${monthLabel(r.month)} ${r.color}：出荷実績 ${r.shipped}／直送 ${r.direct}／在庫補充 ${r.replenish}`).join('\n');
+      if (!confirm(`次の内容を取り込みます（同じ月・色はこの内容で置き換えます）。\n\n${preview}${unknown.length ? `\n\n※ 色マスタにない色：${unknown.join('、')}` : ''}\n\nよろしいですか？`)) return;
+      const res = recs.map(r => upsertReport(p, r));
+      save();
+      const billed = res.filter(x => x === 'billed').length;
+      toast(`販売実績表を取り込みました（${res.length - billed} 件）${billed ? `。請求済みの ${billed} 件は変更していません` : ''}`);
+      rerender();
+    } catch (err) {
+      toast('読み込めませんでした：' + (err.message || err), 'error');
+    } finally {
+      e.target.value = '';
+    }
+  });
+  $$('[data-del-report]').forEach(btn => btn.addEventListener('click', () => {
+    if (!confirm('この出荷実績を削除しますか？')) return;
+    db.salesReports = db.salesReports.filter(r => r.id !== btn.dataset.delReport);
+    save();
+    rerender();
+  }));
+}
+
 // ---------- 請求書（1 枚に 1 件以上の納品書をまとめる） ----------
 const getBill = id => db.bills.find(b => b.id === id);
 const billsOfDn = dnId => db.bills.filter(b => b.dnIds.includes(dnId));
@@ -1675,7 +1864,7 @@ function billLines(b) {
   const groups = new Map();
   dns.forEach(d => {
     const o = getOrder(d.orderId);
-    const key = r.grouping === 'customerPo' ? `po:${o?.customerPoNo || o?.orderNo || ''}` : dns.length > 1 ? `dn:${d.id}` : 'all';
+    const key = r.grouping === 'customerPo' ? `po:${o?.customerPoNo || o?.orderNo || ''}` : dns.length > 1 || (b.reportIds || []).length ? `dn:${d.id}` : 'all';
     const label = r.grouping === 'customerPo'
       ? `貴社発注No. ${o?.customerPoNo || '—'}（当社受注No. ${o?.orderNo || '—'}）`
       : `${shortDate(d.deliveryDate)} 納品　納品書No. ${d.dnNo}${o?.customerPoNo ? `　貴社発注No. ${o.customerPoNo}` : ''}`;
@@ -1690,6 +1879,14 @@ function billLines(b) {
     if (key !== 'all') lines.push({ group: g.label });
     lines.push(...g.items);
   });
+  const reports = (b.reportIds || []).map(id => db.salesReports.find(r => r.id === id)).filter(Boolean)
+    .sort((x, y) => x.month.localeCompare(y.month) || db.colors.indexOf(x.color) - db.colors.indexOf(y.color));
+  const shipped = reports.filter(x => toNum(x.shipped));
+  if (shipped.length) {
+    lines.push({ group: `貴社在庫からの出荷分（販売実績表 ${[...new Set(shipped.map(x => monthLabel(x.month)))].join('・')}）` });
+    shipped.forEach(x => lines.push({ name: x.product || 'レスキューミー', spec: x.color, qty: toNum(x.shipped), unit: findProduct(x.product)?.unit || '個',
+      price: priceFor(b.partnerId, x.product || 'レスキューミー'), date: '', rate: db.settings.taxRate }));
+  }
   if (toNum(b.shipping)) lines.push({ name: '送料', spec: '', qty: 1, unit: '式', price: toNum(b.shipping), rate: db.settings.taxRate });
   const byRate = {};
   lines.filter(l => !l.group).forEach(l => { byRate[l.rate] = (byRate[l.rate] || 0) + lineAmount(l); });
@@ -1714,7 +1911,7 @@ function buildBillModel(b) {
   const m = {
     type: 'bill', title: '請求書', no: b.billNo, to: partnerSnap(p?.id), company: companySnap(), lines, sum,
     subject: b.subject || '', note: notes.filter(Boolean).join('\n'), meta, showDate: dns.length > 1,
-    cond: [['お支払期限', fmtDate(b.payDue)], ['お振込先', db.settings.bankAccount || '']], reissue: null,
+    cond: [['お支払期限', fmtDate(b.payDue)], ['お振込先', db.settings.bankAccount || '']], invoiceNote: db.settings.invoiceNote || '', reissue: null,
   };
   const from = b.reissueOf ? getBill(b.reissueOf)?.billNo : '';
   if (from) {
@@ -1760,6 +1957,7 @@ function billBody(m) {
     <div class="doc-bottom">
       <div class="doc-notes">
         <table class="doc-cond">${m.cond.map(([k, v]) => `<tr><th>${k}</th><td style="white-space:pre-wrap">${k === 'お支払期限' ? `<b>${esc(v)}</b>` : esc(v) || '&nbsp;'}</td></tr>`).join('')}</table>
+        ${m.invoiceNote ? `<p class="inv-note">${esc(m.invoiceNote)}</p>` : ''}
         <div class="note-box"><div class="note-label">備考</div><div class="note-body">${esc(m.note)}</div></div>
       </div>
       <table class="doc-sum">
@@ -1852,7 +2050,11 @@ function cascadeDnVoid(d) {
 function billCandidates() {
   const billed = new Set(db.bills.filter(isLive).flatMap(b => b.dnIds));
   const groups = new Map();
-  db.deliveries.filter(d => stateOf(d) === 'issued' && !billed.has(d.id)).forEach(d => {
+  const add = (p, r, key, base) => {
+    if (!groups.has(key)) groups.set(key, { key, partner: p, rule: r, dnIds: [], reportIds: [], ...base });
+    return groups.get(key);
+  };
+  db.deliveries.filter(d => stateOf(d) === 'issued' && !billed.has(d.id) && d.shipType !== 'stock').forEach(d => {
     const o = getOrder(d.orderId);
     const p = getPartner(o?.customerId);
     if (!p) return;
@@ -1876,10 +2078,20 @@ function billCandidates() {
       target = `納品書 ${d.dnNo}`;
       ready = true;
     }
-    if (!groups.has(key)) groups.set(key, { key, partner: p, rule: r, target, ready, dnIds: [], ...extra });
-    groups.get(key).dnIds.push(d.id);
+    add(p, r, key, { target, ready, ...extra }).dnIds.push(d.id);
   });
-  return [...groups.values()].map(c => ({ ...c, total: billLines({ partnerId: c.partner.id, dnIds: c.dnIds, shipping: c.rule.shipping }).sum.total,
+  // 販売実績表の出荷実績（まだ請求書に入っていないもの）
+  const billedReports = new Set(db.bills.filter(isLive).flatMap(b => b.reportIds || []));
+  db.salesReports.filter(x => !billedReports.has(x.id) && toNum(x.shipped)).forEach(x => {
+    const p = getPartner(x.partnerId);
+    if (!p) return;
+    const r = ruleOf(p);
+    const per = periodOf(`${x.month}-01`, r.unit === 'monthly' ? r.closingDay : 31);
+    const key = r.unit === 'monthly' ? `${p.id}|m|${per.to}` : `${p.id}|r|${x.month}`;
+    add(p, r, key, { target: `${fmtDate(per.from)}〜${fmtDate(per.to)}${r.unit === 'monthly' ? `（${closingLabel(r.closingDay)}締め）` : ''}`,
+      ready: per.to <= today(), periodFrom: per.from, periodTo: per.to }).reportIds.push(x.id);
+  });
+  return [...groups.values()].map(c => ({ ...c, total: billLines({ partnerId: c.partner.id, dnIds: c.dnIds, reportIds: c.reportIds, shipping: c.rule.shipping }).sum.total,
     noPrice: c.dnIds.some(id => getDn(id).items.some(it => toNum(it.qty) && it.price === '')) }))
     .sort((a, b) => a.partner.name.localeCompare(b.partner.name, 'ja') || a.key.localeCompare(b.key));
 }
@@ -1887,11 +2099,11 @@ function billCandidates() {
 function createBill(c) {
   const r = c.rule;
   const dns = c.dnIds.map(getDn);
-  const last = dns.map(d => d.deliveryDate).sort().pop() || today();
-  const invoiceDate = r.unit === 'monthly' ? adjustDay(c.periodTo, r.holiday) : last;
+  const last = dns.map(d => d.deliveryDate).sort().pop() || c.periodTo || today();
+  const invoiceDate = r.unit === 'monthly' || !dns.length ? adjustDay(c.periodTo, r.holiday) : last;
   const first = getOrder(dns[0]?.orderId);
   const b = {
-    id: uid(), billNo: '', status: 'draft', kind: r.unit, partnerId: c.partner.id, dnIds: c.dnIds,
+    id: uid(), billNo: '', status: 'draft', kind: dns.length ? r.unit : 'monthly', partnerId: c.partner.id, dnIds: c.dnIds, reportIds: c.reportIds || [],
     periodFrom: c.periodFrom || '', periodTo: c.periodTo || '', invoiceDate, payDue: payDueOf(invoiceDate, r.payTerm),
     subject: r.unit === 'monthly' ? '' : (r.unit === 'order' ? first?.subject : dns[0]?.subject) || '',
     note: '', shipping: toNum(r.shipping), receiptFor: db.settings.receiptFor, version: 1, createdAt: nowIso(), updatedAt: nowIso(),
@@ -1940,7 +2152,8 @@ function viewBills() {
           <td class="wide">${partnerLink(c.partner.id)}</td><td class="wide"><span class="muted">${esc(ruleSummary(c.partner))}</span></td>
           <td class="wide">${esc(c.target)}${c.ready ? '' : `<br><span class="due-soon">${c.rule.unit === 'monthly' ? '締め日前' : '未納品あり'}</span>`}
             ${c.noPrice ? '<br><span class="due-soon">⚠ 単価が入っていない納品書があります</span>' : ''}</td>
-          <td class="nowrap">${c.dnIds.map(id => `<a href="#/deliveries/${id}">${tag(getDn(id).dnNo, 'is-dn')}</a>`).join('<br>')}</td>
+          <td class="nowrap">${c.dnIds.map(id => `<a href="#/deliveries/${id}">${tag(getDn(id).dnNo, 'is-dn')}</a>`).join('<br>')}
+            ${c.reportIds.length ? `<br><span class="muted">出荷実績 ${c.reportIds.length} 件</span>` : ''}</td>
           <td class="num">${yen(c.total)}</td>
           <td><button class="btn btn-sm ${c.ready ? 'btn-primary' : ''}" data-create="${i}">請求書の下書きを作る</button></td></tr>`).join('')}</tbody>
       </table></div>` : '<div class="empty">請求書にしていない納品書はありません。</div>'}
@@ -1967,7 +2180,8 @@ function billTableHTML(bills) {
     <thead><tr><th>請求書No.</th><th>請求日</th><th>お客様</th><th>対象</th><th class="num">金額（税込）</th><th>状態</th><th>領収書</th></tr></thead>
     <tbody>${bills.map(b => {
       const dns = b.dnIds.map(getDn).filter(Boolean);
-      const target = b.kind === 'monthly' ? `${fmtDate(b.periodFrom)}〜${fmtDate(b.periodTo)}` : dns.map(d => d.dnNo).join('、');
+      const target = (b.kind === 'monthly' ? `${fmtDate(b.periodFrom)}〜${fmtDate(b.periodTo)}` : dns.map(d => d.dnNo).join('、')) +
+        ((b.reportIds || []).length ? '（出荷実績を含む）' : '');
       const rc = activeReceipt(b);
       return `<tr class="clickable${isLive(b) ? '' : ' is-void-row'}" data-href="#/bills/${b.id}" ${isLive(b) ? '' : 'data-void="1"'}
         data-search="${esc([b.billNo, partnerName(b.partnerId), target].join(' '))}">
@@ -2023,6 +2237,8 @@ function viewBillDetail(id) {
     <section class="card no-print">
       ${stateBanner('bill', b)}
       ${st === 'draft' ? '' : changedNotice('bill', b, m)}
+      ${(b.reportIds || []).length ? `<p class="hint" style="margin-top:10px">販売実績表の出荷実績を含みます：${b.reportIds.map(id => db.salesReports.find(r => r.id === id)).filter(Boolean)
+        .map(r => `${monthLabel(r.month)} ${esc(r.color)} ${num(r.shipped)}`).join('、')}（<a href="#/partners/${b.partnerId}">販売実績を確認</a>）</p>` : ''}
       <p class="hint" style="margin-top:10px">${partnerLink(b.partnerId)} の請求書のルール：${esc(ruleSummary(p))}　<a href="#/partners/${b.partnerId}">ルールを確認・変更</a></p>
       <div class="grid-4" style="margin-top:10px">
         <div class="field"><label>請求日</label><input type="date" data-f="invoiceDate" value="${esc(b.invoiceDate)}" ${dis}></div>
@@ -2247,6 +2463,10 @@ function viewDnForm(id, orderIdParam) {
           <div class="field span-all"><label>送付先 <span class="opt">（お客様の住所以外へ送る場合。納品書に印字され、取引先の設定によって請求書の備考にも入ります）</span></label>
             <input name="destination" value="${esc(d.destination)}" placeholder="例：〇〇現場（東京都〇〇区…）"></div>
           <div class="field"><label>消費税率（%）</label><input type="number" name="taxRate" value="${esc(d.taxRate)}" min="0" step="any" class="num"></div>
+          <div class="field span-2" id="ship-type" hidden><label>納品の区分 <span class="req">必須</span></label>
+            <select name="shipType"><option value="">— 選択してください —</option>${Object.entries(SHIP_TYPES).map(([k, l]) =>
+              `<option value="${k}" ${d.shipType === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+            <p class="hint">この取引先は販売実績表（直送分＋先方の出荷実績）で請求します。</p></div>
         </div>
         <p class="hint">宛先はお客様（受注先）になります。お客様発注No.・自社受注No.は自動で印字されます。</p>
       </section>
@@ -2278,6 +2498,11 @@ function viewDnForm(id, orderIdParam) {
     priceOf: n => priceFor(getOrder(form.elements.orderId.value)?.customerId, n) });
   form.elements.taxRate.addEventListener('input', ed.updateTotals);
 
+  const syncShipType = () => {
+    $('#ship-type').hidden = !usesSalesReport(getPartner(getOrder(form.elements.orderId.value)?.customerId));
+  };
+  syncShipType();
+  form.elements.orderId.addEventListener('change', syncShipType);
   let lastOrderId = form.elements.orderId.value;
   form.elements.orderId.addEventListener('change', () => {
     const o = getOrder(form.elements.orderId.value);
@@ -2299,6 +2524,8 @@ function viewDnForm(id, orderIdParam) {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(form));
     if (!f.orderId) return toast('紐付ける受注を選択してください', 'error');
+    const salesReport = usesSalesReport(getPartner(getOrder(f.orderId)?.customerId));
+    if (salesReport && !f.shipType) return toast('納品の区分（直送／在庫補充）を選択してください', 'error');
     const items = cleanItems(ed.items);
     if (!items.length) return toast('明細を1行以上入力してください（品名は必須です）', 'error');
     if (itemsError(items)) return toast(itemsError(items), 'error');
@@ -2315,7 +2542,7 @@ function viewDnForm(id, orderIdParam) {
     const short = stockRows(d.id).filter(r => need[r.color] > r.current).map(r => `${r.color}：在庫 ${num(r.current)} ／ 今回 ${num(need[r.color])}`);
     if (short.length && !confirm(`在庫が足りない色があります。\n${short.join('\n')}\n\nこのまま保存しますか？`)) return;
     Object.assign(d, {
-      orderId: f.orderId, deliveryDate: f.deliveryDate, subject: f.subject.trim(), destination: f.destination.trim(),
+      orderId: f.orderId, deliveryDate: f.deliveryDate, subject: f.subject.trim(), destination: f.destination.trim(), shipType: salesReport ? f.shipType : '',
       taxRate: toNum(f.taxRate), items, note: f.note, updatedAt: new Date().toISOString(),
     });
     if (editing) db.deliveries[db.deliveries.indexOf(editing)] = d;
@@ -2443,6 +2670,7 @@ function viewPartnerDetail(id) {
       <p>${esc(ruleSummary(p))}</p>
       <p class="hint">「✎ 取引先情報を編集」で変更できます。変更は、これから作る請求書に使われます。</p>
     </section>
+    ${usesSalesReport(p) ? salesReportHTML(p) : ''}
     <div class="tiles">
       <div class="tile"><div class="tile-label">受注</div><div class="tile-value">${docs.orders.length} 件</div><div class="tile-sub">${sum(docs.orders)}（税込）</div></div>
       <div class="tile ${open ? 'is-alert' : ''}"><div class="tile-label">未納品の受注</div><div class="tile-value">${open} 件</div><div class="tile-sub">納品が完了していない受注</div></div>
@@ -2470,6 +2698,7 @@ function viewPartnerDetail(id) {
     </section>`);
 
   bindListFilter($('#view'));
+  if (usesSalesReport(p)) bindSalesReport(p, () => { const y = window.scrollY; viewPartnerDetail(id); window.scrollTo(0, y); });
   $('[data-act=edit]').addEventListener('click', async () => {
     if (await openPartnerDialog(p)) viewPartnerDetail(id);
   });
@@ -2801,6 +3030,8 @@ function viewSettings() {
         <div class="grid-2">
           <div class="field"><label>お振込先 <span class="opt">（請求書に印字）</span></label>
             <textarea name="bankAccount" placeholder="例：〇〇銀行 〇〇支店 普通 1234567 口座名義">${esc(s.bankAccount)}</textarea></div>
+          <div class="field"><label>請求書の注記 <span class="opt">（振込先の下に印字）</span></label>
+            <input name="invoiceNote" value="${esc(s.invoiceNote)}"></div>
           <div class="field"><label>領収書の但し書き（標準）</label><input name="receiptFor" value="${esc(s.receiptFor)}">
             <p class="hint">書類ごとに変えることもできます。</p></div>
           <div class="field"><label>納期の警告 <span class="opt">（納期まで何日以内で知らせるか）</span></label>
@@ -2837,6 +3068,7 @@ function viewSettings() {
     s.prefix = { order: prefixes[0], po: prefixes[1], dn: prefixes[2], inv: prefixes[3], rc: prefixes[4] };
     s.taxRate = toNum(f.taxRate);
     s.bankAccount = f.bankAccount.trim();
+    s.invoiceNote = f.invoiceNote.trim();
     s.receiptFor = f.receiptFor.trim();
     s.dueWarnDays = toNum(f.dueWarnDays);
     s.companyHolidays = f.companyHolidays.trim();
