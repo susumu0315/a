@@ -1730,8 +1730,8 @@ function shippedByMonth(partnerId) {
     d.items.forEach(it => {
       if (!it.spec) return;
       const k = `${m}|${it.spec}`;
-      out[k] = out[k] || { direct: 0, stock: 0 };
-      out[k][d.shipType === 'stock' ? 'stock' : 'direct'] += toNum(it.qty);
+      out[k] = out[k] || { direct: 0, stock: 0, unset: 0 };
+      out[k][d.shipType === 'stock' ? 'stock' : d.shipType === 'direct' ? 'direct' : 'unset'] += toNum(it.qty);
     });
   });
   return out;
@@ -1815,11 +1815,11 @@ function salesReportHTML(p) {
       <thead><tr><th>月</th><th>色</th><th class="num">出荷実績</th><th class="num">直送依頼分（表）</th><th class="num">直送（納品書）</th>
         <th class="num">在庫補充（表）</th><th class="num">在庫補充（納品書）</th><th>請求書</th><th></th></tr></thead>
       <tbody>${list.map(r => {
-        const a = app[`${r.month}|${r.color}`] || { direct: 0, stock: 0 };
+        const a = app[`${r.month}|${r.color}`] || { direct: 0, stock: 0, unset: 0 };
         const b = billOfReport(r.id);
         const diff = (x, y) => (x !== y ? ` <span class="over" title="販売実績表と納品書の数が違います">⚠</span>` : '');
         return `<tr><td class="nowrap">${monthLabel(r.month)}</td><td>${esc(r.color)}</td><td class="num"><b>${num(r.shipped)}</b></td>
-          <td class="num">${num(r.direct)}</td><td class="num">${num(a.direct)}${diff(toNum(r.direct), a.direct)}</td>
+          <td class="num">${num(r.direct)}</td><td class="num">${num(a.direct)}${diff(toNum(r.direct), a.direct)}${a.unset ? `<br><span class="due-soon">区分未設定 ${num(a.unset)}</span>` : ''}</td>
           <td class="num">${num(r.replenish)}</td><td class="num">${num(a.stock)}${diff(toNum(r.replenish), a.stock)}</td>
           <td class="nowrap">${b ? `<a href="#/bills/${b.id}">${b.billNo ? tag(b.billNo, 'is-inv') : '下書き'}</a>` : '<span class="muted">未請求</span>'}</td>
           <td>${b ? '' : `<button class="btn btn-sm btn-danger" data-del-report="${r.id}">削除</button>`}</td></tr>`;
