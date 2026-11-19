@@ -68,9 +68,10 @@ function checkLocked_(coll, before, after) {
   if (before.status === 'void' && after.status !== 'void') throw new Error('取消済の' + label + 'は元に戻せません。');
   if (after.status !== 'issued' && after.status !== 'void') throw new Error('発行済の' + label + 'を下書きに戻すことはできません。');
   LOCKED[coll].forEach(f => {
+    if (f === 'shipType' && !before.shipType) return; // 納品の区分（直送／在庫補充）は未設定のときだけ後から設定できる
     if (!same_(before[f], after[f])) throw new Error('発行済の' + label + 'の内容は変更できません（' + f + '）。');
   });
-  ['invoices', 'receipts'].forEach(k => {
+  ['receipts'].forEach(k => {
     (before[k] || []).forEach((e, i) => {
       const a = (after[k] || [])[i];
       if (!a || !same_(without_(e, VOID_FIELDS), without_(a, VOID_FIELDS)) || (e.status === 'void' && a.status !== 'void')) {
@@ -109,11 +110,19 @@ function withLock_(fn) {
 }
 
 // すべてのデータを読み込む
+// 既存のシートの保護は最初の 1 回だけ行う（新しく作るシートは sheet_ で保護する）
+function protectAllOnce_() {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('sheetsProtected')) return;
+  Object.keys(SHEETS).forEach(coll => protect_(sheet_(coll)));
+  props.setProperty('sheetsProtected', '1');
+}
+
 function apiLoad() {
+  protectAllOnce_();
   const data = {};
   Object.keys(SHEETS).forEach(coll => {
     const sh = sheet_(coll);
-    protect_(sh);
     data[coll] = rows_(sh)
       .filter(r => r[COL.id] !== '')
       .map(r => ({ id: String(r[COL.id]), rev: String(r[COL.rev]), data: JSON.parse(r[COL.data]) }));
@@ -195,6 +204,13 @@ function apiSave(json) {
 function apiReplaceAll(json) {
   const req = JSON.parse(json);
   return withLock_(() => {
+    const issued = Object.keys(LOCKED).some(coll => rows_(sheet_(coll)).some(r => {
+      const st = r[COL.id] !== '' && JSON.parse(r[COL.data]).status;
+      return st === 'issued' || st === 'void';
+    }));
+    if (issued || rows_(sheet_('logs')).some(r => r[COL.id] !== '')) {
+      throw new Error('発行済の書類や操作履歴があるため、データ全体の置き換え・全削除はできません。過去の状態に戻す場合は、スプレッドシートの「ファイル → 変更履歴」を使ってください。');
+    }
     const at = new Date();
     const by = user_();
     Object.keys(SHEETS).forEach(coll => {

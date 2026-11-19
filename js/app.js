@@ -290,8 +290,11 @@ async function replaceAll(next) {
   Object.entries(snapshot(next)).forEach(([coll, recs]) => {
     data[coll] = Object.entries(recs).map(([id, json]) => ({ id, data: JSON.parse(json), label: '' }));
   });
-  db = next; // 説明文の取引先名を引けるように先に差し替える
+  // 説明文の取引先名を新しいデータから引くため一時的に差し替え、サーバーが受け付けるまでは元に戻しておく
+  const prev = db;
+  db = next;
   Object.entries(data).forEach(([coll, list]) => list.forEach(r => { r.label = recordLabel(coll, r.id, r.data); }));
+  db = prev;
   const res = await callServer('apiReplaceAll', { data });
   if (!res.ok) throw new Error(res.message);
   await reload();
@@ -349,11 +352,11 @@ function calc(doc) {
   return { sub, tax, total: sub + tax, rate };
 }
 
-// 受注明細ごとの納品済数量 { 明細id: 数量 }
-function deliveredMap(orderId, excludeDnId) {
+// 受注明細ごとの納品済数量 { 明細id: 数量 }。発行済の納品書だけを数える（withDrafts のときは下書きも）
+function deliveredMap(orderId, excludeDnId, withDrafts = false) {
   const map = {};
   dnsOf(orderId).forEach(d => {
-    if (d.id === excludeDnId || !isLive(d)) return;
+    if (d.id === excludeDnId || !(stateOf(d) === 'issued' || (withDrafts && stateOf(d) === 'draft'))) return;
     d.items.forEach(it => { if (it.ref) map[it.ref] = (map[it.ref] || 0) + toNum(it.qty); });
   });
   return map;
@@ -440,7 +443,7 @@ function stockRows(excludeDnId) {
   db.colors.forEach(at);
   db.receipts.forEach(r => { at(r.color).received += toNum(r.qty); });
   db.deliveries.forEach(d => {
-    if (d.id === excludeDnId || !isLive(d)) return;
+    if (d.id === excludeDnId || stateOf(d) !== 'issued') return;
     d.items.forEach(it => { if (it.spec) at(it.spec).shipped += toNum(it.qty); });
   });
   db.orders.forEach(o => {
@@ -499,7 +502,7 @@ function cleanItems(items) {
 
 // 受注明細のうち、まだ納品していない分を納品書の明細にする
 function remainingItems(order, excludeDnId) {
-  const dmap = deliveredMap(order.id, excludeDnId);
+  const dmap = deliveredMap(order.id, excludeDnId, true);
   return order.items
     .map(it => ({ it, rest: toNum(it.qty) - (dmap[it.id] || 0) }))
     .filter(x => x.rest > 0)
@@ -1119,9 +1122,14 @@ function viewOrderDetail(id) {
     toast(`請求書を「${o.billing}」にしました`);
   });
   $('[data-act=delete]').addEventListener('click', () => {
-    const n = posOf(o.id).length + dnsOf(o.id).length;
-    if (n) return alert(`この受注には発注書・納品書が ${n} 件紐付いています。\n先にそれらを削除してから受注を削除してください。`);
-    if (!confirm(`受注 ${o.orderNo} を削除します。よろしいですか？`)) return;
+    const docs = [...posOf(o.id), ...dnsOf(o.id)];
+    const issued = docs.filter(x => stateOf(x) === 'issued').length;
+    if (issued) return alert(`この受注には発行済の発注書・納品書が ${issued} 件あります。\n受注を削除するには、先にそれらを「取消」してください。`);
+    const drafts = docs.filter(x => stateOf(x) === 'draft').length;
+    const voids = docs.length - drafts;
+    if (!confirm(`受注 ${o.orderNo} を削除します。${drafts ? `\n下書きの発注書・納品書 ${drafts} 件も削除します。` : ''}${voids ? `\n取消済の書類 ${voids} 件は控えとして残ります。` : ''}\nよろしいですか？`)) return;
+    db.pos = db.pos.filter(x => !(x.orderId === o.id && stateOf(x) === 'draft'));
+    db.deliveries = db.deliveries.filter(x => !(x.orderId === o.id && stateOf(x) === 'draft'));
     db.orders = db.orders.filter(x => x.id !== o.id);
     db.prospects.forEach(p => { if (p.orderId === o.id) p.orderId = ''; });
     save();
@@ -1249,8 +1257,8 @@ function docBody(m) {
       <td class="r">${num(it.qty)}</td><td class="c">${esc(it.unit)}</td>
       <td class="r">${it.price === '' ? '' : num(it.price)}</td><td class="r">${num(lineAmount(it))}</td></tr>`);
   for (let i = rows.length; i < MIN_ROWS; i++) rows.push('<tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>');
-  const lead = { po: '下記の通り発注いたします。', dn: '下記の通り納品いたしました。ご査収ください。', inv: '下記の通りご請求申し上げます。' }[m.type];
-  const totalLabel = { po: 'ご発注金額', dn: '合計金額', inv: 'ご請求金額' }[m.type];
+  const lead = { po: '下記の通り発注いたします。', dn: '下記の通り納品いたしました。ご査収ください。' }[m.type];
+  const totalLabel = { po: 'ご発注金額', dn: '合計金額' }[m.type];
   return `
     <h1 class="doc-title">${m.title}</h1>
     <div class="doc-head">
@@ -1280,11 +1288,11 @@ function docBody(m) {
     <div class="doc-bottom">
       <div class="doc-notes">
         ${m.cond.length ? `<table class="doc-cond">${m.cond.map(([k, v]) =>
-          `<tr><th>${k}</th><td${m.type === 'inv' ? ' style="white-space:pre-wrap"' : ''}>${k === 'お支払期限' ? `<b>${esc(v)}</b>` : esc(v) || '&nbsp;'}</td></tr>`).join('')}</table>` : ''}
+          `<tr><th>${k}</th><td>${esc(v) || '&nbsp;'}</td></tr>`).join('')}</table>` : ''}
         <div class="note-box"><div class="note-label">備考</div><div class="note-body">${esc(m.note)}</div></div>
       </div>
       <table class="doc-sum">
-        <tr><th>小計${m.type === 'inv' ? `（${num(t.rate)}%対象）` : ''}</th><td>${yen(t.sub)}</td></tr>
+        <tr><th>小計</th><td>${yen(t.sub)}</td></tr>
         <tr><th>消費税（${num(t.rate)}%）</th><td>${yen(t.tax)}</td></tr>
         <tr class="grand"><th>合計</th><td>${yen(t.total)}</td></tr>
       </table>
@@ -1490,6 +1498,10 @@ function viewDocDetail(type, id) {
     <section class="card no-print">
       ${stateBanner(type, d)}
       ${st === 'draft' ? '' : changedNotice(type, d, m)}
+      ${type === 'dn' && st === 'issued' && !d.shipType && usesSalesReport(getPartner(o?.customerId)) ? `<div class="banner">
+        <span>この取引先は販売実績表で請求します。<b>納品の区分</b>を設定すると請求書に入ります（設定は 1 回だけです）：</span>
+        <span class="with-btn"><select data-ship-type><option value="">— 選択 —</option>${Object.entries(SHIP_TYPES).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
+        <button class="btn btn-sm btn-primary" data-act="save-ship-type">保存</button></span></div>` : ''}
       <h2 style="margin-top:14px">紐付け</h2>
       ${o ? chainHTML(o, { currentId: d.id, withAdd: false }) : '<p class="muted">この発注書は受注に紐付いていません。</p>'}
       ${(() => {
@@ -1506,6 +1518,14 @@ function viewDocDetail(type, id) {
   $('[data-act=issue]')?.addEventListener('click', () => issueDoc(type, d));
   $('[data-act=void]')?.addEventListener('click', () => voidDoc(type, d));
   $('[data-act=reissue]')?.addEventListener('click', () => reissueDoc(type, d));
+  $('[data-act=save-ship-type]')?.addEventListener('click', () => {
+    const v = $('[data-ship-type]').value;
+    if (!v) return toast('納品の区分を選択してください', 'error');
+    d.shipType = v;
+    save();
+    toast(`納品の区分を「${SHIP_TYPES[v]}」にしました`);
+    route();
+  });
   $('[data-act=delete]')?.addEventListener('click', () => {
     if (!confirm(`この${T.label}の下書きを削除します。よろしいですか？`)) return;
     if (type === 'po') db.pos = db.pos.filter(x => x.id !== d.id);
@@ -1855,7 +1875,6 @@ function bindSalesReport(p, rerender) {
 const getBill = id => db.bills.find(b => b.id === id);
 const billsOfDn = dnId => db.bills.filter(b => b.dnIds.includes(dnId));
 const liveBillOfDn = dnId => billsOfDn(dnId).find(isLive);
-const billCustomer = b => b.partnerId;
 
 // 請求書に載せる行（区切りの見出し・明細・送料）と、税率ごとの合計
 function billLines(b) {
@@ -2035,7 +2054,7 @@ function cascadeDnVoid(d) {
   billsOfDn(d.id).filter(isLive).forEach(b => {
     if (stateOf(b) === 'draft') {
       b.dnIds = b.dnIds.filter(id => id !== d.id);
-      if (!b.dnIds.length) db.bills = db.bills.filter(x => x.id !== b.id);
+      if (!b.dnIds.length && !(b.reportIds || []).length) db.bills = db.bills.filter(x => x.id !== b.id);
       return;
     }
     const why = `納品書 ${d.dnNo} の取消に伴う取消`;
@@ -2045,6 +2064,13 @@ function cascadeDnVoid(d) {
     syncOrderBilling(billOrderIds(b));
   });
 }
+
+// 販売実績表で請求する取引先の、納品の区分（直送／在庫補充）が未設定の発行済納品書
+const unclassifiedDns = () => db.deliveries.filter(d => {
+  const o = getOrder(d.orderId);
+  return stateOf(d) === 'issued' && !d.shipType && usesSalesReport(getPartner(o?.customerId)) && !liveBillOfDn(d.id) &&
+    !(d.issuedBy === MIGRATED_BY && (o.billing || '未処理') !== '未処理');
+});
 
 // 請求書をまだ作っていない（発行済の）納品書を、取引先のルールでまとめた候補
 function billCandidates() {
@@ -2060,6 +2086,7 @@ function billCandidates() {
     if (!p) return;
     // 以前のデータ（Excel）から移行した納品書で、受注の請求書がすでに処理済みのものはアプリの外で請求済み
     if (d.issuedBy === MIGRATED_BY && (o.billing || '未処理') !== '未処理') return;
+    if (usesSalesReport(p) && !d.shipType) return; // 区分（直送／在庫補充）が決まるまで請求しない
     const r = ruleOf(p);
     let key; let target; let ready; let extra = {};
     if (r.unit === 'monthly') {
@@ -2100,11 +2127,12 @@ function createBill(c) {
   const r = c.rule;
   const dns = c.dnIds.map(getDn);
   const last = dns.map(d => d.deliveryDate).sort().pop() || c.periodTo || today();
-  const invoiceDate = r.unit === 'monthly' || !dns.length ? adjustDay(c.periodTo, r.holiday) : last;
+  const monthly = r.unit === 'monthly' || !dns.length;
+  const invoiceDate = monthly ? adjustDay(c.periodTo, r.holiday) : last;
   const first = getOrder(dns[0]?.orderId);
   const b = {
     id: uid(), billNo: '', status: 'draft', kind: dns.length ? r.unit : 'monthly', partnerId: c.partner.id, dnIds: c.dnIds, reportIds: c.reportIds || [],
-    periodFrom: c.periodFrom || '', periodTo: c.periodTo || '', invoiceDate, payDue: payDueOf(invoiceDate, r.payTerm),
+    periodFrom: c.periodFrom || '', periodTo: c.periodTo || '', invoiceDate, payDue: payDueOf(monthly ? c.periodTo : invoiceDate, r.payTerm),
     subject: r.unit === 'monthly' ? '' : (r.unit === 'order' ? first?.subject : dns[0]?.subject) || '',
     note: '', shipping: toNum(r.shipping), receiptFor: db.settings.receiptFor, version: 1, createdAt: nowIso(), updatedAt: nowIso(),
   };
@@ -2144,6 +2172,8 @@ function viewBills() {
       <div><div class="crumb">ステップ ④</div><h1>請求書</h1></div>
     </div>
     <p class="hint" style="margin:-8px 0 14px">発行済の納品書を、取引先ごとの請求書のルール（納品ごと・受注ごと・締め日でまとめる）で請求書にします。ルールは「取引先」の編集画面で変更できます。</p>
+    ${(() => { const u = unclassifiedDns(); return u.length ? `<div class="banner">納品の区分（直送／在庫補充）が未設定のため、請求書に入れていない納品書があります：
+      ${u.map(d => `<a href="#/deliveries/${d.id}">${esc(d.dnNo)}</a>`).join('、')}。納品書の画面で区分を設定してください。</div>` : ''; })()}
     <section class="card">
       <h2>請求書を作る（まだ請求書にしていない納品書）</h2>
       ${cands.length ? `<div class="table-wrap"><table class="list">
@@ -2281,7 +2311,11 @@ function viewBillDetail(id) {
   $$('[data-show]').forEach(cb => cb.addEventListener('change', () => { setShown[cb.dataset.show] = cb.checked; applyShown(); }));
   $$('input[data-f]').forEach(input => input.addEventListener('change', () => {
     const f = input.dataset.f;
+    const prev = b[f];
     b[f] = f === 'shipping' ? toNum(input.value) : input.value.trim();
+    // 請求日を変えたら、支払期限が自動のままなら請求日から計算し直す（締めでまとめる請求書は締め日から計算するので変えない）
+    const term = ruleOf(getPartner(b.partnerId)).payTerm;
+    if (f === 'invoiceDate' && b.kind !== 'monthly' && b.payDue === payDueOf(prev, term)) b.payDue = payDueOf(b.invoiceDate, term);
     b.updatedAt = nowIso();
     save();
     const y = window.scrollY;
@@ -2489,7 +2523,7 @@ function viewDnForm(id, orderIdParam) {
     const o = getOrder(form.elements.orderId.value);
     const line = o?.items.find(x => x.id === it.ref);
     if (!line) return '';
-    const done = deliveredMap(o.id, d.id)[line.id] || 0;
+    const done = deliveredMap(o.id, d.id, true)[line.id] || 0;
     const rest = toNum(line.qty) - done;
     const over = toNum(it.qty) > rest;
     return `受注数 ${num(line.qty)} ／ 納品済 ${num(done)} ／ 残 ${num(rest)}${over ? '　<span class="over">⚠ 残数を超えています</span>' : ''}`;
@@ -2530,7 +2564,7 @@ function viewDnForm(id, orderIdParam) {
     if (!items.length) return toast('明細を1行以上入力してください（品名は必須です）', 'error');
     if (itemsError(items)) return toast(itemsError(items), 'error');
     const o = getOrder(f.orderId);
-    const dmap = deliveredMap(o.id, d.id);
+    const dmap = deliveredMap(o.id, d.id, true);
     const over = items.some(it => {
       const line = o.items.find(x => x.id === it.ref);
       return line && toNum(it.qty) > toNum(line.qty) - (dmap[line.id] || 0);
