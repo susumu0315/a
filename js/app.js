@@ -530,6 +530,7 @@ const routes = [
   [/^\/partners$/, viewPartners],
   [/^\/partners\/([^/]+)$/, m => viewPartnerDetail(m[1])],
   [/^\/stock$/, viewStock],
+  [/^\/analytics$/, (m, q) => viewAnalytics(q)],
   [/^\/prospects$/, (m, q) => viewProspects(q.get('edit'))],
   [/^\/masters$/, viewMasters],
   [/^\/settings$/, viewSettings],
@@ -844,6 +845,7 @@ function viewDashboard() {
   const lowStock = stockRows().filter(r => r.judge !== 'OK');
   const unbilled = sts.filter(x => x.st.key === 'done' && (x.o.billing || '未処理') === '未処理');
   const toBill = billCandidates().filter(c => c.ready);
+  const monthSales = salesFacts().filter(f => f.month === ym).reduce((a, f) => a + f.amount, 0);
 
   render(`
     ${!c.name ? `<div class="banner"><span>はじめに <b>自社情報（会社名・住所など）</b> を登録してください。発注書・納品書に印字されます。</span>
@@ -862,7 +864,8 @@ function viewDashboard() {
       </div>
     </section>
 
-    <div class="tiles tiles-3">
+    <div class="tiles">
+      <a class="tile" href="#/analytics"><div class="tile-label">今月の売上（出荷・税抜）</div><div class="tile-value">${yen(monthSales)}</div><div class="tile-sub">実績を見る →</div></a>
       <a class="tile" href="#/orders"><div class="tile-label">今月の受注</div><div class="tile-value">${month.length} 件</div><div class="tile-sub">${yen(monthTotal)}（税込）</div></a>
       <a class="tile ${noPo.length ? 'is-alert' : ''}" href="#/orders?status=new"><div class="tile-label">未発注の受注</div><div class="tile-value">${noPo.length} 件</div><div class="tile-sub">発注書がまだの受注</div></a>
       <a class="tile" href="#/orders?status=open"><div class="tile-label">未納品の受注</div><div class="tile-value">${open.length} 件</div><div class="tile-sub">納品が完了していない受注</div></a>
@@ -2704,6 +2707,7 @@ function viewPartnerDetail(id) {
       <p>${esc(ruleSummary(p))}</p>
       <p class="hint">「✎ 取引先情報を編集」で変更できます。変更は、これから作る請求書に使われます。</p>
     </section>
+    ${partnerSalesHTML(p.id)}
     ${usesSalesReport(p) ? salesReportHTML(p) : ''}
     <div class="tiles">
       <div class="tile"><div class="tile-label">受注</div><div class="tile-value">${docs.orders.length} 件</div><div class="tile-sub">${sum(docs.orders)}（税込）</div></div>
@@ -2736,6 +2740,222 @@ function viewPartnerDetail(id) {
   $('[data-act=edit]').addEventListener('click', async () => {
     if (await openPartnerDialog(p)) viewPartnerDetail(id);
   });
+}
+
+// ---------- 実績（出荷ベース） ----------
+// 売上は「出荷した月」で数える：発行済の納品書（先方への在庫補充は除く）＋ 販売実績表の出荷実績。下書き・取消済は含めない
+function salesFacts() {
+  const facts = [];
+  db.deliveries.forEach(d => {
+    if (stateOf(d) !== 'issued' || d.shipType === 'stock') return;
+    const o = getOrder(d.orderId);
+    if (!o) return;
+    const unset = !d.shipType && usesSalesReport(getPartner(o.customerId));
+    d.items.forEach(it => {
+      if (!toNum(it.qty)) return;
+      facts.push({ month: String(d.deliveryDate).slice(0, 7), date: d.deliveryDate, partnerId: o.customerId, orderId: o.id, staff: o.staff || '',
+        color: it.spec || '', product: it.name, qty: toNum(it.qty), amount: lineAmount(it), noPrice: it.price === '', unset });
+    });
+  });
+  db.salesReports.forEach(r => {
+    if (!toNum(r.shipped)) return;
+    const price = priceFor(r.partnerId, r.product || 'レスキューミー');
+    facts.push({ month: r.month, date: '', partnerId: r.partnerId, orderId: '', staff: '', color: r.color, product: r.product || 'レスキューミー',
+      qty: toNum(r.shipped), amount: Math.round(toNum(r.shipped) * toNum(price)), noPrice: price === '', report: true });
+  });
+  return facts;
+}
+const sumBy = (list, key) => {
+  const m = new Map();
+  list.forEach(f => {
+    const k = typeof key === 'function' ? key(f) : f[key];
+    const v = m.get(k) || { key: k, amount: 0, qty: 0, orders: new Set(), last: '' };
+    v.amount += f.amount;
+    v.qty += f.qty;
+    if (f.orderId) v.orders.add(f.orderId);
+    if (f.date > v.last) v.last = f.date;
+    m.set(k, v);
+  });
+  return [...m.values()];
+};
+function monthRange(from, to) {
+  const out = [];
+  let [y, m] = from.split('-').map(Number);
+  const [ty, tm] = to.split('-').map(Number);
+  while (y < ty || (y === ty && m <= tm)) {
+    out.push(`${y}-${String(m).padStart(2, '0')}`);
+    m++;
+    if (m > 12) { m = 1; y++; }
+  }
+  return out;
+}
+const manYen = v => (Math.abs(v) >= 1e6 ? `${Math.round(v / 1e4).toLocaleString('ja-JP')}万円` : Math.abs(v) >= 1e4 ? `${(v / 1e4).toFixed(1)}万円` : `${Math.round(v).toLocaleString('ja-JP')}円`);
+const shortMonth = m => `${+m.slice(5, 7)}月`;
+
+// 縦棒（1 系列）：値は棒の上、ホバーで詳細
+function columnChart(points, { label = manYen, title = p => '' } = {}) {
+  const H = 220;
+  const top = 26;
+  const bottom = 30;
+  const step = 72;
+  const W = Math.max(360, points.length * step + 16);
+  const max = Math.max(1, ...points.map(p => p.value));
+  const bw = 24;
+  const plotH = H - top - bottom;
+  const bars = points.map((p, i) => {
+    const cx = 8 + step * i + step / 2;
+    const h = p.value > 0 ? Math.max(2, (p.value / max) * plotH) : 0;
+    const x = cx - bw / 2;
+    const y = H - bottom - h;
+    const r = Math.min(4, h);
+    const path = h ? `M${x},${H - bottom}V${y + r}Q${x},${y} ${x + r},${y}H${x + bw - r}Q${x + bw},${y} ${x + bw},${y + r}V${H - bottom}Z` : '';
+    return `<g class="col">
+      <rect x="${cx - step / 2}" y="${top - 10}" width="${step}" height="${plotH + 10}" fill="transparent"><title>${esc(title(p))}</title></rect>
+      ${path ? `<path d="${path}" class="col-bar"><title>${esc(title(p))}</title></path>` : ''}
+      <text x="${cx}" y="${y - 6}" text-anchor="middle" class="col-val">${esc(p.value ? label(p.value) : '—')}</text>
+      <text x="${cx}" y="${H - 10}" text-anchor="middle" class="col-lab">${esc(p.label)}</text></g>`;
+  }).join('');
+  return `<div class="chart-scroll"><svg class="col-chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="月別の売上">
+    <line x1="8" x2="${W - 8}" y1="${H - bottom}" y2="${H - bottom}" class="col-base"/>${bars}</svg></div>`;
+}
+
+// 横棒（構成）：ラベル・棒・値・構成比
+const COLOR_SWATCH = { イエロー: '#f2c200', レッド: '#d93a3a', ブラック: '#222222', オレンジ: '#f08a24', ブルー: '#2f7bd9', グリーン: '#2e9e4f',
+  ピンク: '#ef7fb0', ホワイト: '#ffffff', アーミーグリーン: '#5b6b3a', 蓄光イエロー: '#d6e86a' };
+function shareBars(rows, { value, fmt, swatch = false, link, narrow = swatch } = {}) {
+  const total = rows.reduce((a, r) => a + value(r), 0) || 1;
+  const max = Math.max(1, ...rows.map(value));
+  return `<div class="share-bars${narrow ? ' narrow' : ''}">${rows.map(r => {
+    const v = value(r);
+    const sw = swatch ? `<span class="swatch" style="background:${COLOR_SWATCH[r.key] || 'linear-gradient(135deg,#f2c200,#d93a3a,#2f7bd9)'}"></span>` : '';
+    return `<div class="share-row" title="${esc(`${r.label || r.key}：${fmt(v)}（${(v / total * 100).toFixed(1)}%）`)}">
+      <span class="share-lab">${sw}${link ? link(r) : esc(r.label || r.key || '（未設定）')}</span>
+      <span class="share-track"><span class="share-bar" style="width:${(v / max * 100).toFixed(1)}%"></span></span>
+      <span class="share-val">${fmt(v)}</span><span class="share-pct">${(v / total * 100).toFixed(1)}%</span></div>`;
+  }).join('')}</div>`;
+}
+
+function viewAnalytics(q) {
+  const all = salesFacts();
+  const months = [...new Set(all.map(f => f.month))].sort();
+  const cur = today().slice(0, 7);
+  const first = months[0] || cur;
+  const last = months[months.length - 1] > cur ? months[months.length - 1] : cur;
+  const from = q.get('from') || first;
+  const to = q.get('to') || last;
+  const range = monthRange(from, to);
+  const facts = all.filter(f => f.month >= from && f.month <= to);
+  const total = facts.reduce((a, f) => a + f.amount, 0);
+  const qty = facts.reduce((a, f) => a + f.qty, 0);
+  const byMonth = Object.fromEntries(sumBy(facts, 'month').map(x => [x.key, x]));
+  const byPartner = sumBy(facts, 'partnerId').sort((a, b) => b.amount - a.amount);
+  const byColor = sumBy(facts.filter(f => f.color), 'color').sort((a, b) => b.qty - a.qty);
+  const byStaff = sumBy(facts.filter(f => !f.report), f => f.staff || '（未設定）').sort((a, b) => b.amount - a.amount);
+  const noPrice = facts.filter(f => f.noPrice).length;
+  const unset = facts.filter(f => f.unset).length;
+  // 請求済で入金の確認がまだの金額（税込）
+  const unpaid = db.bills.filter(b => stateOf(b) === 'issued').filter(b => {
+    const os = [...new Set(billOrderIds(b))].map(getOrder).filter(Boolean);
+    return !os.length || os.some(o => (o.billing || '未処理') !== '入金確認済');
+  }).reduce((a, b) => a + (b.snap?.sum?.total || 0), 0);
+  const lastM = range[range.length - 1];
+  const prevM = range[range.length - 2];
+  const pmAmount = (pid, m) => facts.filter(f => f.partnerId === pid && f.month === m).reduce((a, f) => a + f.amount, 0);
+  const allMonths = monthRange(first, last);
+  const monthOpts = sel => allMonths.map(m => `<option value="${m}" ${m === sel ? 'selected' : ''}>${monthLabel(m)}</option>`).join('');
+
+  render(`
+    <div class="page-head"><div><h1>実績（出荷ベース）</h1></div>
+      <div class="actions"><button class="btn" data-act="csv">⬇ 取引先別・月別を CSV で保存</button></div></div>
+    <p class="hint" style="margin:-8px 0 12px">売上は商品を出荷した月で数えます：発行済の納品書（先方への在庫補充は除く）＋ ジーエムの販売実績表の出荷実績。下書き・取消済の書類は含みません。金額は税抜です。</p>
+    <div class="filters analytics-filters">
+      <label>期間 <select data-from>${monthOpts(from)}</select></label> 〜 <select data-to>${monthOpts(to)}</select>
+      ${noPrice ? `<span class="muted">⚠ 単価のない出荷 ${noPrice} 行は 0 円で数えています</span>` : ''}
+      ${unset ? `<span class="muted">⚠ 納品の区分が未設定のジーエムの出荷 ${unset} 行を含みます</span>` : ''}
+    </div>
+    <div class="tiles">
+      <div class="tile"><div class="tile-label">売上（税抜）</div><div class="tile-value">${yen(total)}</div><div class="tile-sub">${monthLabel(from)}〜${monthLabel(to)}</div></div>
+      <div class="tile"><div class="tile-label">出荷数量</div><div class="tile-value">${num(qty)} 個</div><div class="tile-sub">平均単価 ${qty ? yen(total / qty) : '—'}</div></div>
+      <div class="tile"><div class="tile-label">取引先</div><div class="tile-value">${byPartner.length} 社</div><div class="tile-sub">期間内に出荷した取引先</div></div>
+      <a class="tile ${unpaid ? 'is-alert' : ''}" href="#/bills"><div class="tile-label">入金待ち（請求済・税込）</div><div class="tile-value">${yen(unpaid)}</div><div class="tile-sub">入金確認済でない請求書</div></a>
+    </div>
+    <section class="card">
+      <h2>月別の売上</h2>
+      ${columnChart(range.map(m => ({ label: shortMonth(m), value: byMonth[m]?.amount || 0, qty: byMonth[m]?.qty || 0, m })),
+        { title: p => `${monthLabel(p.m)}：${yen(p.value)}（${num(p.qty)} 個）` })}
+      <div class="table-wrap"><table class="list compact">
+        <thead><tr><th></th>${range.map(m => `<th class="num">${shortMonth(m)}</th>`).join('')}<th class="num">合計</th></tr></thead>
+        <tbody><tr><th>売上</th>${range.map(m => `<td class="num">${yen(byMonth[m]?.amount || 0)}</td>`).join('')}<td class="num"><b>${yen(total)}</b></td></tr>
+        <tr><th>数量</th>${range.map(m => `<td class="num">${num(byMonth[m]?.qty || 0)}</td>`).join('')}<td class="num"><b>${num(qty)}</b></td></tr></tbody>
+      </table></div>
+    </section>
+    <section class="card">
+      <h2>取引先別</h2>
+      ${byPartner.length ? shareBars(byPartner.slice(0, 10).map(x => ({ ...x, label: partnerName(x.key) })), { value: r => r.amount, fmt: yen,
+        link: r => partnerLink(r.key) }) : '<div class="empty">期間内の出荷はありません。</div>'}
+      ${byPartner.length > 10 ? `<p class="hint">上位 10 社を表示しています（全 ${byPartner.length} 社は下の表）。</p>` : ''}
+      ${byPartner.length ? `<div class="table-wrap" style="margin-top:12px"><table class="list compact">
+        <thead><tr><th>取引先</th>${range.map(m => `<th class="num">${shortMonth(m)}</th>`).join('')}<th class="num">合計</th><th class="num">構成比</th><th class="num">数量</th>
+          ${prevM ? `<th class="num">前月比</th>` : ''}<th>最終出荷日</th></tr></thead>
+        <tbody>${byPartner.map(x => {
+          const a = pmAmount(x.key, lastM);
+          const b = prevM ? pmAmount(x.key, prevM) : 0;
+          const diff = prevM ? (b ? `${a >= b ? '＋' : '−'}${Math.abs((a - b) / b * 100).toFixed(0)}%` : a ? '新規' : '—') : '';
+          return `<tr><td class="wide">${partnerLink(x.key)}</td>${range.map(m => `<td class="num">${pmAmount(x.key, m) ? yen(pmAmount(x.key, m)) : '<span class="muted">—</span>'}</td>`).join('')}
+            <td class="num"><b>${yen(x.amount)}</b></td><td class="num">${total ? (x.amount / total * 100).toFixed(1) : 0}%</td><td class="num">${num(x.qty)}</td>
+            ${prevM ? `<td class="num">${diff}</td>` : ''}<td class="nowrap">${x.last ? esc(x.last) : '<span class="muted">販売実績表</span>'}</td></tr>`;
+        }).join('')}</tbody></table></div>
+        ${prevM ? `<p class="hint">前月比は ${monthLabel(lastM)} と ${monthLabel(prevM)} の比較です。${lastM === cur ? `${monthLabel(lastM)}は月の途中のため、月末までは少なく出ます。` : ''}</p>` : ''}` : ''}
+    </section>
+    <div class="grid-2 analytics-2">
+      <section class="card">
+        <h2>色別（出荷数量）</h2>
+        ${byColor.length ? shareBars(byColor, { value: r => r.qty, fmt: v => `${num(v)} 個`, swatch: true }) : '<div class="empty">データがありません。</div>'}
+        <p class="hint">在庫の発注点や仕入数の見直しに使えます。</p>
+      </section>
+      <section class="card">
+        <h2>担当者別</h2>
+        ${byStaff.length ? `<div class="table-wrap"><table class="list compact">
+          <thead><tr><th>担当者</th><th class="num">受注</th><th class="num">数量</th><th class="num">売上</th></tr></thead>
+          <tbody>${byStaff.map(x => `<tr><td>${esc(x.key)}</td><td class="num">${x.orders.size} 件</td><td class="num">${num(x.qty)}</td><td class="num">${yen(x.amount)}</td></tr>`).join('')}</tbody>
+        </table></div><p class="hint">ジーエムの販売実績表の出荷分は担当者別には含めません。</p>` : '<div class="empty">データがありません。</div>'}
+      </section>
+    </div>`);
+
+  const apply = () => {
+    let f = $('[data-from]').value;
+    let t = $('[data-to]').value;
+    if (f > t) [f, t] = [t, f];
+    go(`#/analytics?from=${f}&to=${t}`);
+  };
+  $('[data-from]').addEventListener('change', apply);
+  $('[data-to]').addEventListener('change', apply);
+  $('[data-act=csv]').addEventListener('click', () => {
+    const rows = [['取引先', ...range.map(monthLabel), '合計（税抜）', '数量']];
+    byPartner.forEach(x => rows.push([partnerName(x.key), ...range.map(m => pmAmount(x.key, m)), x.amount, x.qty]));
+    const csv = rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+    download(`resqmej_実績_${from}_${to}.csv`, '﻿' + csv, 'text/csv');
+  });
+}
+
+// 取引先の画面に出す、その取引先の実績
+function partnerSalesHTML(pid) {
+  const facts = salesFacts().filter(f => f.partnerId === pid);
+  if (!facts.length) return '';
+  const months = [...new Set(facts.map(f => f.month))].sort();
+  const range = monthRange(months[0], months[months.length - 1] > today().slice(0, 7) ? months[months.length - 1] : today().slice(0, 7));
+  const byMonth = Object.fromEntries(sumBy(facts, 'month').map(x => [x.key, x]));
+  const byColor = sumBy(facts.filter(f => f.color), 'color').sort((a, b) => b.qty - a.qty);
+  const total = facts.reduce((a, f) => a + f.amount, 0);
+  return `<section class="card">
+    <h2>実績（出荷ベース・税抜）　<span class="muted" style="font-size:.9rem">合計 ${yen(total)}</span></h2>
+    <div class="grid-2 analytics-2">
+      <div>${columnChart(range.map(m => ({ label: shortMonth(m), value: byMonth[m]?.amount || 0, qty: byMonth[m]?.qty || 0, m })),
+        { title: p => `${monthLabel(p.m)}：${yen(p.value)}（${num(p.qty)} 個）` })}</div>
+      <div>${byColor.length ? shareBars(byColor, { value: r => r.qty, fmt: v => `${num(v)} 個`, swatch: true }) : ''}</div>
+    </div>
+    <p class="hint"><a href="#/analytics">全体の実績を見る</a></p>
+  </section>`;
 }
 
 // ---------- 在庫 ----------
