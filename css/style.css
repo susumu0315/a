@@ -353,6 +353,35 @@ table.doc-sum th { background: #eef1f5; text-align: left; font-weight: 600; }
 table.doc-sum td { text-align: right; }
 table.doc-sum tr.grand th, table.doc-sum tr.grand td { font-weight: 800; font-size: 11.5pt; background: #e2e7ee; }
 .doc-set .paper + .paper { margin-top: 24px; }
+/* 書類の状態：下書き・取消の透かし、再発行の印 */
+.paper { position: relative; overflow: hidden; }
+.wm {
+  position: absolute; top: 40%; left: 50%; transform: translate(-50%, -50%) rotate(-28deg);
+  font-weight: 800; white-space: nowrap; pointer-events: none; z-index: 2; letter-spacing: .15em;
+}
+.wm-void { font-size: 110pt; color: rgba(198, 40, 40, .25); border: 8px solid rgba(198, 40, 40, .25); padding: 0 .25em; border-radius: 12px; }
+.wm-draft { font-size: 90pt; color: rgba(100, 116, 139, .16); }
+.reissue-stamp {
+  position: absolute; top: 12mm; right: 14mm; width: 21mm; height: 21mm; border: 2.5px solid #c62828; border-radius: 50%;
+  color: #c62828; display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.05; z-index: 3;
+}
+.reissue-stamp b { font-size: 20pt; }
+.reissue-stamp small { font-size: 7pt; font-weight: 700; }
+.no-tag.is-draft { background: #eef1f5; color: var(--muted); }
+.no-tag.is-void { text-decoration: line-through; opacity: .7; }
+.re-mark {
+  display: inline-grid; place-items: center; width: 1.45em; height: 1.45em; margin-left: 4px; border: 1.5px solid var(--danger);
+  border-radius: 50%; color: var(--danger); font-size: .78rem; font-weight: 800; vertical-align: middle;
+}
+.chain-card.is-void-card, tr.is-void-row { opacity: .6; }
+.state-banner { border-radius: 8px; padding: 10px 14px; display: flex; flex-direction: column; gap: 4px; }
+.state-banner.is-draft { background: #fff7e6; border: 1px solid #f3d29b; }
+.state-banner.is-issued { background: #e9f7ef; border: 1px solid #b7e2c7; }
+.state-banner.is-void { background: #fdecec; border: 1px solid #f3b4b4; }
+.number-pending { padding: 9px 12px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); font-weight: 600; }
+table.set-status th { width: 7em; }
+label.check { display: inline-flex; align-items: center; gap: 6px; font-size: .9rem; }
+label.check input { width: auto; }
 .paper[hidden] { display: none; }
 .set-toggles label { cursor: pointer; }
 .set-toggles input { width: auto; margin: 0 4px 0 0; }
@@ -422,6 +451,7 @@ table.doc-sum tr.grand th, table.doc-sum tr.grand td { font-weight: 800; font-si
   .paper { width: auto; min-height: 0; margin: 0; padding: 0; box-shadow: none; }
   .doc-set .paper + .paper { margin-top: 0; }
   .paper.page-break { break-before: page; }
+  .reissue-stamp { top: 0; right: 0; }
   .paper[hidden] { display: none !important; }
   * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }

@@ -5,12 +5,18 @@
 
 const SHEETS = {
   config: '設定', partners: '取引先', products: '商品', orders: '受注', pos: '発注書',
-  deliveries: '納品書', receipts: '入庫', prospects: '見込み案件',
+  deliveries: '納品書', receipts: '入庫', prospects: '見込み案件', logs: '操作履歴',
 };
 const HEADER = ['id', '内容', '更新日時', '更新者', 'rev', 'data'];
 const COL = { id: 0, label: 1, at: 2, by: 3, rev: 4, data: 5 };
 // 同じ番号が重複してはいけない項目
 const UNIQUE = { orders: ['orderNo', '自社受注No.'], pos: ['poNo', '発注No.'], deliveries: ['dnNo', '納品書No.'] };
+// 発行済・取消済の書類で変更してはいけない項目
+const LOCKED = {
+  pos: ['poNo', 'orderId', 'supplierId', 'items', 'snap', 'issuedAt', 'issuedBy', 'reissueOf'],
+  deliveries: ['dnNo', 'orderId', 'deliveryDate', 'items', 'snap', 'issuedAt', 'issuedBy', 'reissueOf'],
+};
+const VOID_FIELDS = ['status', 'voidAt', 'voidBy', 'voidReason'];
 
 function doGet() {
   return HtmlService.createHtmlOutputFromFile('Index')
@@ -29,8 +35,48 @@ function sheet_(coll) {
     sh.getRange('A:B').setNumberFormat('@');
     sh.getRange('E:F').setNumberFormat('@');
     sh.setColumnWidth(2, 480);
+    protect_(sh);
   }
   return sh;
+}
+
+// シートは管理者（スクリプトの所有者）だけが編集できるよう保護する。アプリは所有者の権限で書き込む
+function protect_(sh) {
+  if (sh.getProtections(SpreadsheetApp.ProtectionType.SHEET).length) return;
+  const p = sh.protect().setDescription('resqmej：アプリからのみ変更してください');
+  p.removeEditors(p.getEditors());
+  if (p.canDomainEdit()) p.setDomainEdit(false);
+}
+
+const same_ = (a, b) => JSON.stringify(a === undefined ? null : a) === JSON.stringify(b === undefined ? null : b);
+const without_ = (o, keys) => {
+  const c = Object.assign({}, o);
+  keys.forEach(k => { delete c[k]; });
+  return c;
+};
+
+// 発行した書類は削除・変更させない（取消への変更と、請求書・領収書の追加発行・取消だけを認める）
+function checkLocked_(coll, before, after) {
+  if (coll === 'logs') {
+    if (before) throw new Error('操作履歴は変更・削除できません。');
+    return;
+  }
+  if (!LOCKED[coll] || !before || !before.status || before.status === 'draft') return;
+  const label = SHEETS[coll];
+  if (!after) throw new Error('発行済・取消済の' + label + 'は削除できません。');
+  if (before.status === 'void' && after.status !== 'void') throw new Error('取消済の' + label + 'は元に戻せません。');
+  if (after.status !== 'issued' && after.status !== 'void') throw new Error('発行済の' + label + 'を下書きに戻すことはできません。');
+  LOCKED[coll].forEach(f => {
+    if (!same_(before[f], after[f])) throw new Error('発行済の' + label + 'の内容は変更できません（' + f + '）。');
+  });
+  ['invoices', 'receipts'].forEach(k => {
+    (before[k] || []).forEach((e, i) => {
+      const a = (after[k] || [])[i];
+      if (!a || !same_(without_(e, VOID_FIELDS), without_(a, VOID_FIELDS)) || (e.status === 'void' && a.status !== 'void')) {
+        throw new Error('発行済の請求書・領収書は変更・削除できません。');
+      }
+    });
+  });
 }
 
 function rows_(sh) {
@@ -65,7 +111,9 @@ function withLock_(fn) {
 function apiLoad() {
   const data = {};
   Object.keys(SHEETS).forEach(coll => {
-    data[coll] = rows_(sheet_(coll))
+    const sh = sheet_(coll);
+    protect_(sh);
+    data[coll] = rows_(sh)
       .filter(r => r[COL.id] !== '')
       .map(r => ({ id: String(r[COL.id]), rev: String(r[COL.rev]), data: JSON.parse(r[COL.data]) }));
   });
@@ -96,6 +144,7 @@ function apiSave(json) {
         if (cur !== (op.baseRev || '')) {
           throw new Error('ほかの人が先に同じデータを変更しました（' + SHEETS[coll] + '）。');
         }
+        checkLocked_(coll, i === undefined ? null : JSON.parse(rows[i][COL.data]), op.del ? null : op.data);
       });
       if (UNIQUE[coll]) {
         const [field, label] = UNIQUE[coll];
