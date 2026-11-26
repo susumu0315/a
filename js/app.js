@@ -304,13 +304,13 @@ async function replaceAll(next) {
 async function refreshIfIdle() {
   if (!REMOTE || pending || document.hidden) return;
   if (/[/?](new|edit)\b|^#\/(masters|settings)/.test(location.hash) || document.activeElement?.matches('input, textarea, select')) return;
-  const before = JSON.stringify(snapshot(db));
+  if (document.querySelector('dialog[open]')) return;
   try { await reload(); } catch (e) { return console.error(e); }
-  if (JSON.stringify(snapshot(db)) !== before) {
-    const y = window.scrollY;
-    route();
-    window.scrollTo(0, y);
-  }
+  // 読み込み直すとデータが新しいオブジェクトになるので、内容が同じでも画面を作り直す
+  // （作り直さないと、画面のボタンが古いオブジェクトを変更して保存されない）
+  const y = window.scrollY;
+  route();
+  window.scrollTo(0, y);
 }
 
 const NO_FIELD = { order: 'orderNo', po: 'poNo', dn: 'dnNo', bill: 'billNo' };
@@ -884,7 +884,7 @@ function viewDashboard() {
     </section>
     ${!db.orders.length ? `<section class="card empty">まだ受注がありません。<br>
       <a class="btn btn-primary" href="#/orders/new">＋ 最初の受注を登録する</a>
-      <button class="btn" data-act="sample">サンプルデータで試してみる</button></section>` : ''}
+      ${REMOTE ? '' : '<button class="btn" data-act="sample">サンプルデータで試してみる</button>'}</section>` : ''}
   `);
   bindListFilter($('#view'));
   $('[data-act=sample]')?.addEventListener('click', loadSample);
@@ -1319,6 +1319,9 @@ const voidFields = reason => ({ status: 'void', voidAt: nowIso(), voidBy: curren
 
 function billIssueError(b) {
   if (!b.dnIds.length && !(b.reportIds || []).length) return '請求書に納品書・出荷実績が含まれていません';
+  const dup = db.bills.find(x => x.id !== b.id && stateOf(x) === 'issued' &&
+    (x.dnIds.some(id => b.dnIds.includes(id)) || (x.reportIds || []).some(id => (b.reportIds || []).includes(id))));
+  if (dup) return `この請求書の納品書・出荷実績は、請求書 ${dup.billNo} で請求済みです。この請求書は削除してください`;
   if (b.dnIds.some(id => stateOf(getDn(id) || {}) !== 'issued')) return '取消・未発行の納品書が含まれています';
   if (b.dnIds.some(id => getDn(id).items.some(noPriceLine))) {
     return '単価が入っていない納品書があります。その納品書を「取消」して単価を入れて再発行してから、請求書を作り直してください';
@@ -2070,11 +2073,14 @@ function cascadeDnVoid(d) {
   });
 }
 
+// 以前のデータ（Excel）から移行した納品書で、受注の請求書がすでに処理済みのもの（アプリの外で請求済み）
+const billedOutside = (d, o) => d.issuedBy === MIGRATED_BY && (o?.billing || '未処理') !== '未処理';
 // 販売実績表で請求する取引先の、納品の区分（直送／在庫補充）が未設定の発行済納品書
-const unclassifiedDns = () => db.deliveries.filter(d => {
+// （withBilledOutside：アプリの外で請求済みの移行データも含める。売上の集計から除いている分の警告用）
+const unclassifiedDns = (withBilledOutside = false) => db.deliveries.filter(d => {
   const o = getOrder(d.orderId);
   return stateOf(d) === 'issued' && !d.shipType && usesSalesReport(getPartner(o?.customerId)) && !liveBillOfDn(d.id) &&
-    !(d.issuedBy === MIGRATED_BY && (o.billing || '未処理') !== '未処理');
+    (withBilledOutside || !billedOutside(d, o));
 });
 
 // 請求書をまだ作っていない（発行済の）納品書を、取引先のルールでまとめた候補
@@ -2090,7 +2096,7 @@ function billCandidates() {
     const p = getPartner(o?.customerId);
     if (!p) return;
     // 以前のデータ（Excel）から移行した納品書で、受注の請求書がすでに処理済みのものはアプリの外で請求済み
-    if (d.issuedBy === MIGRATED_BY && (o.billing || '未処理') !== '未処理') return;
+    if (billedOutside(d, o)) return;
     if (usesSalesReport(p) && !d.shipType) return; // 区分（直送／在庫補充）が決まるまで請求しない
     const r = ruleOf(p);
     let key; let target; let ready; let extra = {};
@@ -2657,7 +2663,9 @@ function viewPartners() {
   }));
   $$('[data-del]').forEach(b => b.addEventListener('click', () => {
     const p = getPartner(b.dataset.del);
-    if (usage(p)) return alert('この取引先は受注・発注書で使われているため削除できません。');
+    if (usage(p) || db.bills.some(x => x.partnerId === p.id) || db.salesReports.some(x => x.partnerId === p.id)) {
+      return alert('この取引先は受注・発注書・請求書・販売実績表で使われているため削除できません。');
+    }
     if (!confirm(`${p.name} を削除します。よろしいですか？`)) return;
     db.partners = db.partners.filter(x => x.id !== p.id);
     save();
@@ -2786,7 +2794,7 @@ function salesFacts() {
   return facts;
 }
 // 区分（直送／在庫補充）が未設定のため売上・請求から除いている納品書の行数
-const unsetSalesLines = () => unclassifiedDns().reduce((a, d) => a + d.items.filter(it => toNum(it.qty)).length, 0);
+const unsetSalesLines = () => unclassifiedDns(true).reduce((a, d) => a + d.items.filter(it => toNum(it.qty)).length, 0);
 
 const sumBy = (list, key) => {
   const m = new Map();
@@ -2801,13 +2809,19 @@ const sumBy = (list, key) => {
   });
   return [...m.values()];
 };
-// 「YYYY-MM」から「YYYY-MM」までの月の一覧（形式が違えば空。最大 240 か月）
+// 「YYYY-MM」から「YYYY-MM」までの月の一覧（形式が違えば空。最大 240 か月で、超えるときは新しい側を残す）
 function monthRange(from, to) {
   if (!MONTH_RE.test(from) || !MONTH_RE.test(to)) return [];
   const out = [];
   let [y, m] = from.split('-').map(Number);
   const [ty, tm] = to.split('-').map(Number);
-  while ((y < ty || (y === ty && m <= tm)) && out.length < 240) {
+  const over = (ty * 12 + tm) - (y * 12 + m) + 1 - 240;
+  if (over > 0) {
+    const start = y * 12 + (m - 1) + over;
+    y = Math.floor(start / 12);
+    m = start % 12 + 1;
+  }
+  while (y < ty || (y === ty && m <= tm)) {
     out.push(`${y}-${String(m).padStart(2, '0')}`);
     m++;
     if (m > 12) { m = 1; y++; }
@@ -3312,7 +3326,7 @@ function viewSettings() {
           <div class="field span-2"><label>発注書の標準の支払条件</label><input name="paymentTerms" value="${esc(s.paymentTerms)}"></div>
         </div>
         <p class="hint">番号は「頭文字-西暦-連番」の形で自動採番されます（例：${esc(s.prefix.order)}-${new Date().getFullYear()}-0001）。
-          請求書・領収書は納品書の番号の頭文字を変えたものになります（例：${esc(s.prefix.dn)}-${new Date().getFullYear()}-0001 → ${esc(s.prefix.inv)}-${new Date().getFullYear()}-0001）。</p>
+          請求書は請求書だけの連番、領収書は請求書の番号の頭文字を変えたものになります（例：${esc(s.prefix.inv)}-${new Date().getFullYear()}-0001 → ${esc(s.prefix.rc)}-${new Date().getFullYear()}-0001）。</p>
       </section>
       <section class="card">
         <h2>請求書・領収書・納期の警告</h2>
@@ -3341,7 +3355,7 @@ function viewSettings() {
         <button class="btn" data-act="export">⬇ バックアップを保存（JSON）</button>
         <label class="btn">⬆ バックアップから復元<input type="file" accept=".json,application/json" data-act="import" hidden></label>
         <button class="btn" data-act="csv">⬇ 紐付け一覧を Excel 用 CSV で保存</button>
-        <button class="btn" data-act="sample">サンプルデータを追加</button>
+        ${REMOTE ? '' : '<button class="btn" data-act="sample">サンプルデータを追加</button>'}
         <button class="btn btn-danger" data-act="reset">すべてのデータを削除</button>
       </div>
     </section>`);
@@ -3384,7 +3398,7 @@ function viewSettings() {
     }
   });
   $('[data-act=csv]').addEventListener('click', exportCsv);
-  $('[data-act=sample]').addEventListener('click', loadSample);
+  $('[data-act=sample]')?.addEventListener('click', loadSample);
   $('[data-act=reset]').addEventListener('click', async () => {
     if (!confirm(`すべてのデータ（受注・発注書・納品書・取引先・在庫・設定）を削除します。${REMOTE ? '社内の全員のデータが消えます。' : ''}元に戻せません。よろしいですか？`)) return;
     if (prompt('確認のため「削除」と入力してください') !== '削除') return;
@@ -3427,6 +3441,8 @@ function exportCsv() {
 
 // ---------- サンプルデータ ----------
 function loadSample() {
+  // 共有版では、架空の書類が発行済として残ってしまうため追加しない
+  if (REMOTE) return toast('社内共有（スプレッドシート）版ではサンプルデータは追加できません', 'error');
   if (db.orders.length && !confirm('今のデータにサンプルデータを追加します。よろしいですか？')) return;
   const P = (name, kind, contact, address) => {
     const p = { id: uid(), name, kind, honorific: '御中', zip: '', address, tel: '', contact };

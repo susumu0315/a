@@ -81,6 +81,34 @@ function checkLocked_(coll, before, after) {
   });
 }
 
+// 同じ納品書・出荷実績を 2 枚の発行済請求書に入れない（2 人が同時に発行したときの二重請求を防ぐ）
+function checkDoubleBilling_(rows, ops) {
+  const bills = {};
+  rows.forEach(r => { bills[String(r[COL.id])] = JSON.parse(r[COL.data]); });
+  const issuedNow = {};
+  ops.forEach(op => {
+    if (!op.del && op.data.status === 'issued' && (!bills[op.id] || bills[op.id].status !== 'issued')) issuedNow[op.id] = true;
+  });
+  ops.forEach(op => {
+    if (op.del) delete bills[op.id];
+    else bills[op.id] = op.data;
+  });
+  const owners = {};
+  Object.keys(bills).forEach(id => {
+    const b = bills[id];
+    if (b.status !== 'issued') return;
+    (b.dnIds || []).map(x => 'dn:' + x).concat((b.reportIds || []).map(x => 'report:' + x)).forEach(k => {
+      (owners[k] = owners[k] || []).push(id);
+    });
+  });
+  Object.keys(owners).forEach(k => {
+    const ids = owners[k];
+    if (ids.length < 2 || !ids.some(id => issuedNow[id])) return;
+    const other = ids.find(id => !issuedNow[id]) || ids[0];
+    throw new Error('同じ納品書・出荷実績が、ほかの発行済の請求書（' + (bills[other].billNo || '') + '）に含まれています。');
+  });
+}
+
 function rows_(sh) {
   const n = sh.getLastRow() - 1;
   return n > 0 ? sh.getRange(2, 1, n, HEADER.length).getValues() : [];
@@ -172,6 +200,7 @@ function apiSave(json) {
           seen[v] = true;
         });
       }
+      if (coll === 'bills') checkDoubleBilling_(rows, byColl[coll]);
       return { coll, sh, rows, index };
     });
 
