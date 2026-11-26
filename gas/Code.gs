@@ -17,6 +17,7 @@ const LOCKED = {
   deliveries: ['dnNo', 'orderId', 'deliveryDate', 'items', 'shipType', 'snap', 'issuedAt', 'issuedBy', 'reissueOf'],
   bills: ['billNo', 'partnerId', 'dnIds', 'reportIds', 'invoiceDate', 'payDue', 'subject', 'note', 'shipping', 'snap', 'issuedAt', 'issuedBy', 'reissueOf'],
 };
+const MIGRATED_BY = '（以前のデータから移行）'; // js/app.js と同じ
 const VOID_FIELDS = ['status', 'voidAt', 'voidBy', 'voidReason'];
 
 function doGet() {
@@ -104,7 +105,13 @@ function checkDoubleBilling_(rows, ops, dnOps) {
       if (!dns[dnId] || dns[dnId].status !== 'issued') throw new Error('請求書に、取消・未発行の納品書が含まれています。');
       if (dns[dnId].shipType === 'stock') throw new Error('請求書に、先方への在庫補充の納品書が含まれています。');
       const o = orders[dns[dnId].orderId];
-      if (o && o.billedOutside === true) throw new Error('請求書に、Excel で請求済みの受注（' + (o.orderNo || '') + '）の納品書が含まれています。');
+      // 取り込んだ時点で請求済みの受注（印のない古い取り込みデータは、移行した納品書で受注の状況がアプリ以外で進んでいるもの）
+      let src = dns[dnId];
+      for (let i = 0; i < 50 && src.reissueOf && dns[src.reissueOf]; i++) src = dns[src.reissueOf];
+      const migratedBilled = src.issuedBy === MIGRATED_BY && o && (o.billing || '未処理') !== '未処理' && !o.billingByApp;
+      if (o && (o.billedOutside === true || (o.billedOutside === undefined && migratedBilled))) {
+        throw new Error('請求書に、Excel で請求済みの受注（' + (o.orderNo || '') + '）の納品書が含まれています。');
+      }
     }));
     const reports = {};
     rows_(sheet_('salesReports')).forEach(r => { if (r[COL.id] !== '') reports[String(r[COL.id])] = JSON.parse(r[COL.data]); });

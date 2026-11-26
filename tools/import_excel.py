@@ -57,18 +57,19 @@ def product_name(v):
 BILLING_STATUSES = ('未処理', '発行済', '送付済', '入金確認済')
 
 
-UNKNOWN_BILLING = {}  # アプリの 4 種類以外だった「請求書処理」の値と、読み替えた状況
+UNKNOWN_BILLING = collections.Counter()  # アプリの 4 種類以外だった「請求書処理」の値と件数
 
 
 def billing_status(v):
-    """Excel の「請求書処理」をアプリの請求書の状況にそろえる（空や「未」を含む値は未処理、それ以外は発行済）"""
+    """Excel の「請求書処理」をアプリの請求書の状況にそろえる。空は未処理。
+    4 種類以外の値は請求済みかどうか決められないので記録し、取り込みを止める（main で表示）"""
     s = str(v or '').strip()
     if s in BILLING_STATUSES:
         return s
-    st = '未処理' if s in ('', 'なし', '-', '－') or '未' in s else '発行済'
-    if s:
-        UNKNOWN_BILLING[s] = st
-    return st
+    if s in ('', 'なし', '-', '－'):
+        return '未処理'
+    UNKNOWN_BILLING[s] += 1
+    return '未処理'
 
 
 def main(src, dst):
@@ -156,6 +157,13 @@ def main(src, dst):
         'stock': {'opening': opening, 'reorder': reorder}, 'orders': orders, 'pos': [], 'deliveries': deliveries,
         'receipts': receipts, 'prospects': prospects,
     }
+    if UNKNOWN_BILLING:
+        # 請求済みかどうかを推測すると、請求漏れや二重請求になるため取り込まない
+        print('「請求書処理」に、アプリで使えない値があります。Excel の値を「未処理・発行済・送付済・入金確認済」のどれか'
+              '（空欄は未処理）に直してから、もう一度実行してください：', file=sys.stderr)
+        for k, n in UNKNOWN_BILLING.items():
+            print(f'  {k}（{n} 行）', file=sys.stderr)
+        sys.exit(1)
     with open(dst, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=1)
 
@@ -174,10 +182,6 @@ def main(src, dst):
     received = collections.Counter()
     for r in receipts:
         received[r['color']] += r['qty']
-    if UNKNOWN_BILLING:
-        print('「請求書処理」を次のように読み替えました（発行済＝Excel で請求済み。違う場合はアプリの受注の画面で直してください）：')
-        for k, v in UNKNOWN_BILLING.items():
-            print(f'  {k} → {v}')
     print(f'受注 {len(orders)} 件（Excel {len(rows)} 行）／納品書 {len(deliveries)} 件／取引先 {len(partners)} 社／'
           f'商品 {len(products)} 品／見込み案件 {len(prospects)} 件')
     print('色\tアプリ現在庫\tExcel現在庫\tアプリ有効在庫\tExcel有効在庫')

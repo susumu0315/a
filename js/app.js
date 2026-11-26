@@ -1082,8 +1082,10 @@ function viewOrderForm(id, customerParam, prospectParam) {
       updatedAt: new Date().toISOString(),
     });
     if (o.billing === '未処理') {
+      if (editing && editing.billing !== '未処理' && billedOutsideOrder(editing) &&
+        !confirm('この受注は Excel で請求済みとして取り込まれています。「未処理」にすると、この受注の納品書をアプリで請求できるようになります。\nExcel で請求していないことを確認しましたか？')) return;
       delete o.billingByApp;
-      if (o.billedOutside) o.billedOutside = false;
+      delete o.billedOutside;
     }
     linkPartnerKind(o.customerId, 'customer');
     if (editing) db.orders[db.orders.indexOf(editing)] = o;
@@ -1142,10 +1144,15 @@ function viewOrderDetail(id) {
     </section>`);
 
   $('[data-act=billing]').addEventListener('change', e => {
+    if (e.target.value === '未処理' && billedOutsideOrder(o) &&
+      !confirm('この受注は Excel で請求済みとして取り込まれています。「未処理」にすると、この受注の納品書をアプリで請求できるようになります。\nExcel で請求していないことを確認しましたか？')) {
+      e.target.value = o.billing;
+      return;
+    }
     o.billing = e.target.value;
     if (o.billing === '未処理') {
       delete o.billingByApp;
-      if (o.billedOutside) o.billedOutside = false;
+      delete o.billedOutside;
     }
     save();
     toast(`請求書を「${o.billing}」にしました`);
@@ -1348,6 +1355,8 @@ function billIssueError(b) {
     (x.dnIds.some(id => b.dnIds.includes(id)) || (x.reportIds || []).some(id => (b.reportIds || []).includes(id))));
   if (dup) return `この請求書の納品書・出荷実績は、請求書 ${dup.billNo} で請求済みです。この請求書は削除してください`;
   if (b.dnIds.some(id => stateOf(getDn(id) || {}) !== 'issued')) return '取消・未発行の納品書が含まれています';
+  const outside = b.dnIds.map(getDn).find(d => billedOutside(d, getOrder(d.orderId)));
+  if (outside) return `納品書 ${outside.dnNo} の受注は Excel で請求済みです。請求書から外して作り直してください`;
   if (b.dnIds.some(id => getDn(id).shipType === 'stock')) return '先方への在庫補充の納品書は請求しません。請求書から外して作り直してください';
   if (usesSalesReport(getPartner(b.partnerId)) && b.dnIds.some(id => !getDn(id).shipType)) {
     return '納品の区分（直送／在庫補充）が未設定の納品書が含まれています。納品書の画面で区分を設定してください';
@@ -2129,6 +2138,8 @@ const billedOutside = (d, o) => {
   if (typeof o?.billedOutside === 'boolean') return o.billedOutside;
   return originDn(d).issuedBy === MIGRATED_BY && (o?.billing || '未処理') !== '未処理' && !o.billingByApp;
 };
+// 受注が Excel で請求済みとして扱われているか（受注の印、または古い取り込みデータで移行した納品書がある）
+const billedOutsideOrder = o => o?.billedOutside === true || dnsOf(o.id).some(d => billedOutside(d, o));
 // 販売実績表で請求する取引先の、納品の区分（直送／在庫補充）が未設定で、発行済の請求書に入っていない納品書（実績に入らない）。
 // アプリの外で請求済みの移行データも含める（区分を設定すると実績に入る）
 const unclassifiedDns = () => db.deliveries.filter(d => {
