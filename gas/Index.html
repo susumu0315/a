@@ -1673,6 +1673,7 @@ function viewOrderForm(id, customerParam, prospectParam) {
       subject: f.subject.trim(), taxRate: toNum(f.taxRate), items, note: f.note,
       updatedAt: new Date().toISOString(),
     });
+    if (editing && f.billing !== editing.billing) delete o.billingByApp;
     linkPartnerKind(o.customerId, 'customer');
     if (editing) db.orders[db.orders.indexOf(editing)] = o;
     else db.orders.push({ ...o, createdAt: o.updatedAt });
@@ -1731,6 +1732,7 @@ function viewOrderDetail(id) {
 
   $('[data-act=billing]').addEventListener('change', e => {
     o.billing = e.target.value;
+    delete o.billingByApp;
     save();
     toast(`請求書を「${o.billing}」にしました`);
   });
@@ -1932,6 +1934,7 @@ function billIssueError(b) {
     (x.dnIds.some(id => b.dnIds.includes(id)) || (x.reportIds || []).some(id => (b.reportIds || []).includes(id))));
   if (dup) return `この請求書の納品書・出荷実績は、請求書 ${dup.billNo} で請求済みです。この請求書は削除してください`;
   if (b.dnIds.some(id => stateOf(getDn(id) || {}) !== 'issued')) return '取消・未発行の納品書が含まれています';
+  if (b.dnIds.some(id => getDn(id).shipType === 'stock')) return '先方への在庫補充の納品書は請求しません。請求書から外して作り直してください';
   if (usesSalesReport(getPartner(b.partnerId)) && b.dnIds.some(id => !getDn(id).shipType)) {
     return '納品の区分（直送／在庫補充）が未設定の納品書が含まれています。納品書の画面で区分を設定してください';
   }
@@ -2667,9 +2670,11 @@ function syncOrderBilling(orderIds) {
   [...new Set(orderIds)].map(getOrder).filter(Boolean).forEach(o => {
     const billed = dnsOf(o.id).some(d => inIssuedBill(d.id));
     const cur = o.billing || '未処理';
-    if (billed && cur === '未処理') o.billing = '発行済';
-    // 移行した納品書がある受注は、「発行済」が Excel での請求の印のこともあるので戻さない（二重請求を防ぐ。必要なら受注の画面で変更）
-    if (!billed && cur === '発行済' && !dnsOf(o.id).some(d => originDn(d).issuedBy === MIGRATED_BY)) o.billing = '未処理';
+    if (billed && cur === '未処理') Object.assign(o, { billing: '発行済', billingByApp: true });
+    // 移行した納品書がある受注の「発行済」は、Excel での請求の印のことがあるので、アプリで付けたときだけ戻す（二重請求を防ぐ）
+    const migrated = dnsOf(o.id).some(d => isLive(d) && originDn(d).issuedBy === MIGRATED_BY);
+    if (!billed && cur === '発行済' && (o.billingByApp || !migrated)) o.billing = '未処理';
+    if (o.billing !== '発行済') delete o.billingByApp;
   });
 }
 const billOrderIds = b => b.dnIds.map(id => getDn(id)?.orderId).filter(Boolean);
@@ -2700,7 +2705,8 @@ function originDn(d) {
   return d;
 }
 // 以前のデータ（Excel）から移行した納品書（を再発行したもの）で、受注の請求書がすでに処理済みのもの（アプリの外で請求済み）
-const billedOutside = (d, o) => originDn(d).issuedBy === MIGRATED_BY && (o?.billing || '未処理') !== '未処理';
+const billedOutside = (d, o) => originDn(d).issuedBy === MIGRATED_BY && (o?.billing || '未処理') !== '未処理' &&
+  !(o.billing === '発行済' && o.billingByApp);
 // 販売実績表で請求する取引先の、納品の区分（直送／在庫補充）が未設定で、発行済の請求書に入っていない納品書（実績に入らない）。
 // アプリの外で請求済みの移行データも含める（区分を設定すると実績に入る）
 const unclassifiedDns = () => db.deliveries.filter(d => {
@@ -3520,6 +3526,10 @@ function viewAnalytics(q) {
   let from = MONTH_RE.test(q.get('from') || '') ? q.get('from') : first;
   let to = MONTH_RE.test(q.get('to') || '') ? q.get('to') : last;
   if (from > to) [from, to] = [to, from];
+  if (allMonths.length) {
+    if (from < allMonths[0]) from = allMonths[0];
+    if (to < from) to = from;
+  }
   const range = monthRange(from, to);
   if (range.length) from = range[0];
   const facts = all.filter(f => f.month >= from && f.month <= to);
