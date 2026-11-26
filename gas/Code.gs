@@ -81,8 +81,9 @@ function checkLocked_(coll, before, after) {
   });
 }
 
-// 同じ納品書・出荷実績を 2 枚の発行済請求書に入れない（2 人が同時に発行したときの二重請求を防ぐ）
-function checkDoubleBilling_(rows, ops) {
+// 同じ納品書・出荷実績を 2 枚の発行済請求書に入れない（2 人が同時に発行したときの二重請求を防ぐ）。
+// 発行する請求書の納品書が、ほかの人に取消されていないかも確認する
+function checkDoubleBilling_(rows, ops, dnOps) {
   const bills = {};
   rows.forEach(r => { bills[String(r[COL.id])] = JSON.parse(r[COL.data]); });
   const issuedNow = {};
@@ -93,6 +94,14 @@ function checkDoubleBilling_(rows, ops) {
     if (op.del) delete bills[op.id];
     else bills[op.id] = op.data;
   });
+  if (Object.keys(issuedNow).length) {
+    const dns = {};
+    rows_(sheet_('deliveries')).forEach(r => { dns[String(r[COL.id])] = JSON.parse(r[COL.data]); });
+    dnOps.forEach(op => { if (op.del) delete dns[op.id]; else dns[op.id] = op.data; });
+    Object.keys(issuedNow).forEach(id => (bills[id].dnIds || []).forEach(dnId => {
+      if (!dns[dnId] || dns[dnId].status !== 'issued') throw new Error('請求書に、取消・未発行の納品書が含まれています。');
+    }));
+  }
   const owners = {};
   Object.keys(bills).forEach(id => {
     const b = bills[id];
@@ -200,7 +209,7 @@ function apiSave(json) {
           seen[v] = true;
         });
       }
-      if (coll === 'bills') checkDoubleBilling_(rows, byColl[coll]);
+      if (coll === 'bills') checkDoubleBilling_(rows, byColl[coll], byColl.deliveries || []);
       return { coll, sh, rows, index };
     });
 

@@ -804,7 +804,9 @@ function setSync(text) {
   if (el) el.textContent = text ?? (pending ? '保存中…' : `✓ 保存済み${currentUser ? '（' + currentUser + '）' : ''}`);
 }
 
+let saveCount = 0;
 function save() {
+  saveCount++;
   if (!REMOTE) {
     try {
       localStorage.setItem(STORE_KEY, JSON.stringify(db));
@@ -850,23 +852,34 @@ function pushOps(ops) {
   });
 }
 
-async function reload() {
+// 戻り値：データを置き換えたら true。
+// keepSame：内容が今と同じなら今のデータ（オブジェクト）をそのまま使う。画面のボタンが持っているレコードが古くならない
+// apply：読み込み中に操作があったときなど、取り込まないときは false を返す関数
+async function reload({ keepSame = false, apply } = {}) {
   const res = await callServer('apiLoad');
-  generation++;
-  currentUser = res.user || '';
-  revs = {};
+  if (apply && !apply()) return false;
+  const nextRevs = {};
   const raw = {};
   Object.entries(res.data).forEach(([coll, list]) => {
-    revs[coll] = Object.fromEntries(list.map(r => [r.id, r.rev]));
+    nextRevs[coll] = Object.fromEntries(list.map(r => [r.id, r.rev]));
     if (coll === 'config') list.forEach(r => { raw[r.id] = r.data; });
     else raw[coll] = list.map(r => r.data);
   });
   const empty = !res.data.config?.length;
+  const next = empty ? defaultData() : normalize(clone(raw));
+  currentUser = res.user || '';
+  revs = nextRevs;
   synced = empty ? {} : snapshot(raw);
-  db = empty ? defaultData() : normalize(clone(raw));
+  if (keepSame && !empty && JSON.stringify(snapshot(next)) === JSON.stringify(snapshot(db))) {
+    setSync();
+    return false;
+  }
+  generation++;
+  db = next;
   migrateIssued();
   save(); // 空のスプレッドシートには初期データを、旧版のデータには移行結果を書き込む
   setSync();
+  return true;
 }
 
 // バックアップからの復元・全削除：スプレッドシートの内容をまるごと置き換える
@@ -893,16 +906,19 @@ async function replaceAll(next) {
 }
 
 // 他の人の変更を取り込む（入力中の画面では行わない）
+const isIdle = () => REMOTE && !pending && !document.hidden && !document.querySelector('dialog[open]') &&
+  !/[/?](new|edit)\b|^#\/(masters|settings)/.test(location.hash) && !document.activeElement?.matches('input, textarea, select');
 async function refreshIfIdle() {
-  if (!REMOTE || pending || document.hidden) return;
-  if (/[/?](new|edit)\b|^#\/(masters|settings)/.test(location.hash) || document.activeElement?.matches('input, textarea, select')) return;
-  if (document.querySelector('dialog[open]')) return;
-  try { await reload(); } catch (e) { return console.error(e); }
-  // 読み込み直すとデータが新しいオブジェクトになるので、内容が同じでも画面を作り直す
-  // （作り直さないと、画面のボタンが古いオブジェクトを変更して保存されない）
-  const y = window.scrollY;
-  route();
-  window.scrollTo(0, y);
+  if (!isIdle()) return;
+  const saves = saveCount;
+  let changed;
+  // 読み込み中に保存や入力があったら、読み込んだ内容（保存より前のもの）は取り込まない
+  try { changed = await reload({ keepSame: true, apply: () => isIdle() && saveCount === saves }); } catch (e) { return console.error(e); }
+  if (changed) {
+    const y = window.scrollY;
+    route();
+    window.scrollTo(0, y);
+  }
 }
 
 const NO_FIELD = { order: 'orderNo', po: 'poNo', dn: 'dnNo', bill: 'billNo' };
@@ -2474,7 +2490,10 @@ function bindSalesReport(p, rerender) {
 // ---------- 請求書（1 枚に 1 件以上の納品書をまとめる） ----------
 const getBill = id => db.bills.find(b => b.id === id);
 const billsOfDn = dnId => db.bills.filter(b => b.dnIds.includes(dnId));
-const liveBillOfDn = dnId => billsOfDn(dnId).find(isLive);
+const liveBillOfDn = dnId => {
+  const live = billsOfDn(dnId).filter(isLive);
+  return live.find(b => stateOf(b) === 'issued') || live[0];
+};
 
 // 請求書に載せる行（区切りの見出し・明細・送料）と、税率ごとの合計
 function billLines(b) {
@@ -2665,14 +2684,15 @@ function cascadeDnVoid(d) {
   });
 }
 
-// 以前のデータ（Excel）から移行した納品書で、受注の請求書がすでに処理済みのもの（アプリの外で請求済み）
-const billedOutside = (d, o) => d.issuedBy === MIGRATED_BY && (o?.billing || '未処理') !== '未処理';
-// 販売実績表で請求する取引先の、納品の区分（直送／在庫補充）が未設定の発行済納品書
-// （withBilledOutside：アプリの外で請求済みの移行データも含める。売上の集計から除いている分の警告用）
-const unclassifiedDns = (withBilledOutside = false) => db.deliveries.filter(d => {
+// 以前のデータ（Excel）から移行した納品書で、受注の請求書がすでに処理済みのもの（アプリの外で請求済み）。
+// アプリで請求書を発行した受注は、その発行で「発行済」になっているので外での請求とはみなさない
+const billedOutside = (d, o) => d.issuedBy === MIGRATED_BY && (o?.billing || '未処理') !== '未処理' &&
+  !dnsOf(o.id).some(x => billsOfDn(x.id).some(b => stateOf(b) === 'issued'));
+// 販売実績表で請求する取引先の、納品の区分（直送／在庫補充）が未設定の発行済納品書（請求書にも実績にも入らない）。
+// アプリの外で請求済みの移行データも含める（区分を設定すると実績に入る）
+const unclassifiedDns = () => db.deliveries.filter(d => {
   const o = getOrder(d.orderId);
-  return stateOf(d) === 'issued' && !d.shipType && usesSalesReport(getPartner(o?.customerId)) && !liveBillOfDn(d.id) &&
-    (withBilledOutside || !billedOutside(d, o));
+  return stateOf(d) === 'issued' && !d.shipType && usesSalesReport(getPartner(o?.customerId)) && !liveBillOfDn(d.id);
 });
 
 // 請求書をまだ作っていない（発行済の）納品書を、取引先のルールでまとめた候補
@@ -2775,7 +2795,7 @@ function viewBills() {
       <div><div class="crumb">ステップ ④</div><h1>請求書</h1></div>
     </div>
     <p class="hint" style="margin:-8px 0 14px">発行済の納品書を、取引先ごとの請求書のルール（納品ごと・受注ごと・締め日でまとめる）で請求書にします。ルールは「取引先」の編集画面で変更できます。</p>
-    ${(() => { const u = unclassifiedDns(); return u.length ? `<div class="banner">納品の区分（直送／在庫補充）が未設定のため、請求書に入れていない納品書があります：
+    ${(() => { const u = unclassifiedDns(); return u.length ? `<div class="banner">納品の区分（直送／在庫補充）が未設定のため、請求書・実績に入れていない納品書があります：
       ${u.map(d => `<a href="#/deliveries/${d.id}">${esc(d.dnNo)}</a>`).join('、')}。納品書の画面で区分を設定してください。</div>` : ''; })()}
     <section class="card">
       <h2>請求書を作る（まだ請求書にしていない納品書）</h2>
@@ -3350,7 +3370,7 @@ const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 function billableDn(d) {
   if (stateOf(d) !== 'issued' || d.shipType === 'stock') return false;
   const o = getOrder(d.orderId);
-  return !!o && !(usesSalesReport(getPartner(o.customerId)) && !d.shipType);
+  return !!o && (!!d.shipType || !usesSalesReport(getPartner(o.customerId)) || !!liveBillOfDn(d.id));
 }
 // 出荷実績の単価：請求書を発行済みならその単価、まだなら取引先の今の単価
 function reportPrice(r) {
@@ -3386,7 +3406,7 @@ function salesFacts() {
   return facts;
 }
 // 区分（直送／在庫補充）が未設定のため売上・請求から除いている納品書の行数
-const unsetSalesLines = () => unclassifiedDns(true).reduce((a, d) => a + d.items.filter(it => toNum(it.qty)).length, 0);
+const unsetSalesLines = () => unclassifiedDns().reduce((a, d) => a + d.items.filter(it => toNum(it.qty)).length, 0);
 
 const sumBy = (list, key) => {
   const m = new Map();
@@ -3488,6 +3508,7 @@ function viewAnalytics(q) {
   let to = MONTH_RE.test(q.get('to') || '') ? q.get('to') : last;
   if (from > to) [from, to] = [to, from];
   const range = monthRange(from, to);
+  if (range.length) from = range[0];
   const facts = all.filter(f => f.month >= from && f.month <= to);
   const total = facts.reduce((a, f) => a + f.amount, 0);
   const qty = facts.reduce((a, f) => a + f.qty, 0);
