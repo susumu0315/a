@@ -60,15 +60,15 @@ BILLING_STATUSES = ('未処理', '発行済', '送付済', '入金確認済')
 UNKNOWN_BILLING = collections.Counter()  # アプリの 4 種類以外だった「請求書処理」の値と件数
 
 
-def billing_status(v):
-    """Excel の「請求書処理」をアプリの請求書の状況にそろえる。空は未処理。
-    4 種類以外の値は請求済みかどうか決められないので記録し、取り込みを止める（main で表示）"""
+def billing_status(v, rows=1):
+    """Excel の「請求書処理」をアプリの請求書の状況にそろえる。空欄は未処理。
+    4 種類以外の値は請求済みかどうか決められないので行数を記録し、取り込みを止める（main で表示）"""
     s = str(v or '').strip()
     if s in BILLING_STATUSES:
         return s
-    if s in ('', 'なし', '-', '－'):
+    if not s:
         return '未処理'
-    UNKNOWN_BILLING[s] += 1
+    UNKNOWN_BILLING[s] += rows
     return '未処理'
 
 
@@ -116,7 +116,7 @@ def main(src, dst):
             price = PARTNER_PRICES.get(cname, {}).get(name, PRICES.get(name, ''))
             items.append({'id': uid(), 'name': name, 'spec': (r[4] or '').strip(), 'qty': r[5] or 0, 'unit': '個', 'price': price})
         cname, branch = split_branch(company)
-        bill_st = billing_status(billing)
+        bill_st = billing_status(billing, len(g['rows']))
         # 請求はアプリに統一する。取り込んだ時点で請求書が処理済みの受注は Excel で請求済みとして印を付ける
         order = {'id': uid(), 'orderNo': f'JO-{odate[:4]}-{n:04d}', 'customerPoNo': '', 'customerId': partner(cname),
                  'orderDate': odate, 'dueDate': due, 'answerDate': answer, 'staff': st, 'billing': bill_st,
