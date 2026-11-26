@@ -1673,11 +1673,7 @@ function viewOrderForm(id, customerParam, prospectParam) {
       subject: f.subject.trim(), taxRate: toNum(f.taxRate), items, note: f.note,
       updatedAt: new Date().toISOString(),
     });
-    if (editing && o.billing !== editing.billing) {
-      const wasOutside = editing.billing !== '未処理' && billedOutsideOrder(editing);
-      if (o.billing === '未処理' && wasOutside && !confirm(UNBILL_CONFIRM)) return;
-      applyManualBilling(o, wasOutside);
-    }
+    if (editing && o.billing !== editing.billing && !setBillingByHand(o, editing.billing, o.billing)) return;
     linkPartnerKind(o.customerId, 'customer');
     if (editing) db.orders[db.orders.indexOf(editing)] = o;
     else db.orders.push({ ...o, createdAt: o.updatedAt });
@@ -1735,13 +1731,10 @@ function viewOrderDetail(id) {
     </section>`);
 
   $('[data-act=billing]').addEventListener('change', e => {
-    const wasOutside = o.billing !== '未処理' && billedOutsideOrder(o);
-    if (e.target.value === '未処理' && wasOutside && !confirm(UNBILL_CONFIRM)) {
+    if (!setBillingByHand(o, o.billing, e.target.value)) {
       e.target.value = o.billing;
       return;
     }
-    o.billing = e.target.value;
-    applyManualBilling(o, wasOutside);
     save();
     toast(`請求書を「${o.billing}」にしました`);
   });
@@ -2684,6 +2677,7 @@ function syncOrderBilling(orderIds) {
     const billed = dnsOf(o.id).some(d => inIssuedBill(d.id));
     const cur = o.billing || '未処理';
     if (billed && cur === '未処理') Object.assign(o, { billing: '発行済', billingByApp: true });
+    if (billed) delete o.billedOutsideWas; // アプリで請求した受注は、後で手で状況を戻しても Excel で請求済みに戻さない
     // 移行した納品書がある受注の「発行済」は、Excel での請求の印のことがあるので、アプリで付けたときだけ戻す（二重請求を防ぐ）
     const migrated = dnsOf(o.id).some(d => isLive(d) && originDn(d).issuedBy === MIGRATED_BY);
     // アプリの請求書で進めた状況は、送付済でも戻す（入金確認済は入金の記録なので残す）
@@ -2729,16 +2723,22 @@ const billedOutside = (d, o) => {
 // 受注が Excel で請求済みとして扱われているか（受注の印、または古い取り込みデータで移行した納品書がある）
 const billedOutsideOrder = o => o?.billedOutside === true || dnsOf(o.id).some(d => billedOutside(d, o));
 const UNBILL_CONFIRM = 'この受注は Excel で請求済みとして取り込まれています。「未処理」にすると、この受注の納品書をアプリで請求できるようになります。\nExcel で請求していないことを確認しましたか？';
-// 手で請求書の状況を変えたとき：Excel で請求済みの受注を「未処理」にしたら印を外し（外したことを覚えておく）、
-// その後アプリの請求書なしで請求済みの状況に戻したら印を戻す（誤って「未処理」にしたときに二重請求にならないように）
-function applyManualBilling(o, wasOutside) {
-  if (o.billing === '未処理') {
-    delete o.billingByApp;
+// 手で請求書の状況を prev から next に変える（受注の画面・受注のフォーム）。確認でやめたら false。
+// Excel で請求済みの受注を「未処理」にするときは確認して印を外し（外したことを覚えておく）、その後アプリの請求書が
+// ないまま請求済みの状況に戻したら印を戻す（誤って「未処理」にしたときに二重請求にならないように）
+function setBillingByHand(o, prev, next) {
+  const wasOutside = prev !== '未処理' && billedOutsideOrder({ ...o, billing: prev });
+  if (next === '未処理' && wasOutside && !confirm(UNBILL_CONFIRM)) return false;
+  const appBilled = dnsOf(o.id).some(d => inIssuedBill(d.id));
+  o.billing = next;
+  if (next === '未処理') {
+    if (!appBilled) delete o.billingByApp;
     if (wasOutside) Object.assign(o, { billedOutside: false, billedOutsideWas: true });
-  } else if (o.billedOutsideWas && !o.billingByApp) {
+  } else if (o.billedOutsideWas && !o.billingByApp && !appBilled) {
     o.billedOutside = true;
     delete o.billedOutsideWas;
   }
+  return true;
 }
 // 販売実績表で請求する取引先の、納品の区分（直送／在庫補充）が未設定で、発行済の請求書に入っていない納品書（実績に入らない）。
 // アプリの外で請求済みの移行データも含める（区分を設定すると実績に入る）

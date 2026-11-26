@@ -187,7 +187,8 @@ def main(src, dst):
     print('色\tアプリ現在庫\tExcel現在庫\tアプリ有効在庫\tExcel有効在庫')
     for c, x in excel_stock.items():
         cur = opening.get(c, 0) + received[c] - shipped[c]
-        print(f'{c}\t{cur}\t{x["現在庫"]}\t{cur - allocated[c]}\t{x["有効在庫"]}{"" if cur == x["現在庫"] and cur - allocated[c] == x["有効在庫"] else "\t← 不一致"}')
+        mark = '' if cur == x['現在庫'] and cur - allocated[c] == x['有効在庫'] else '\t← 不一致'
+        print(f'{c}\t{cur}\t{x["現在庫"]}\t{cur - allocated[c]}\t{x["有効在庫"]}{mark}')
 
 
 if __name__ == '__main__':
