@@ -1952,6 +1952,8 @@ function issueDoc(type, d) {
   if (type === 'dn' && !d.deliveryDate) return toast('納品日を入力してから発行してください', 'error');
   if (!confirm(`この${T.label}を発行します。\n発行すると番号が付いて内容が確定し、編集・削除はできなくなります（誤りがあった場合は「取消」して再発行します）。\nよろしいですか？`)) return;
   Object.assign(d, { [T.noField]: nextNo(type), status: 'issued', issuedAt: nowIso(), issuedBy: currentUser, version: d.version || 1 });
+  // 発行時の出荷実績の数を残す（サーバーで最新の販売実績と照合する）
+  if (type === 'bill') d.reportQty = Object.fromEntries((d.reportIds || []).map(id => [id, toNum(db.salesReports.find(r => r.id === id)?.shipped)]));
   d.snap = buildModel(type, d);
   const old = d.reissueOf ? getDoc(type, d.reissueOf) : null;
   if (old) old.replacedBy = d.id;
@@ -2121,7 +2123,7 @@ function viewDocDetail(type, id) {
     <section class="card no-print">
       ${stateBanner(type, d)}
       ${st === 'draft' ? '' : changedNotice(type, d, m)}
-      ${type === 'dn' && st === 'issued' && !d.shipType && usesSalesReport(getPartner(o?.customerId)) ? `<div class="banner">
+      ${type === 'dn' && st === 'issued' && !d.shipType && usesSalesReport(getPartner(o?.customerId)) && !inIssuedBill(d.id) ? `<div class="banner">
         <span>この取引先は販売実績表で請求します。<b>納品の区分</b>を設定すると請求書に入ります（設定は 1 回だけです）：</span>
         <span class="with-btn"><select data-ship-type><option value="">— 選択 —</option>${Object.entries(SHIP_TYPES).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
         <button class="btn btn-sm btn-primary" data-act="save-ship-type">保存</button></span></div>` : ''}
@@ -2673,7 +2675,8 @@ function syncOrderBilling(orderIds) {
     if (billed && cur === '未処理') Object.assign(o, { billing: '発行済', billingByApp: true });
     // 移行した納品書がある受注の「発行済」は、Excel での請求の印のことがあるので、アプリで付けたときだけ戻す（二重請求を防ぐ）
     const migrated = dnsOf(o.id).some(d => isLive(d) && originDn(d).issuedBy === MIGRATED_BY);
-    if (!billed && cur === '発行済' && (o.billingByApp || !migrated)) o.billing = '未処理';
+    // アプリの請求書で進めた状況は、送付済でも戻す（入金確認済は入金の記録なので残す）
+    if (!billed && (cur === '発行済' || (cur === '送付済' && o.billingByApp)) && (o.billingByApp || !migrated)) o.billing = '未処理';
     if (o.billing === '未処理') delete o.billingByApp;
   });
 }
@@ -2705,8 +2708,14 @@ function originDn(d) {
   return d;
 }
 // 以前のデータ（Excel）から移行した納品書（を再発行したもの）で、受注の請求書がすでに処理済みのもの（アプリの外で請求済み）
-// （アプリの請求書で状況を進めた受注 billingByApp は除く。送付済・入金確認済に進めても印は残す）
-const billedOutside = (d, o) => originDn(d).issuedBy === MIGRATED_BY && (o?.billing || '未処理') !== '未処理' && !o.billingByApp;
+// 取り込みツールが、取り込んだ時点の状況を納品書に記録している（billedOutside）。記録のない古い取り込みデータは、
+// 受注の今の状況で決める（アプリの請求書で状況を進めた受注 billingByApp は除く）
+const billedOutside = (d, o) => {
+  const src = originDn(d);
+  if (src.issuedBy !== MIGRATED_BY) return false;
+  if (typeof src.billedOutside === 'boolean') return src.billedOutside;
+  return (o?.billing || '未処理') !== '未処理' && !o.billingByApp;
+};
 // 販売実績表で請求する取引先の、納品の区分（直送／在庫補充）が未設定で、発行済の請求書に入っていない納品書（実績に入らない）。
 // アプリの外で請求済みの移行データも含める（区分を設定すると実績に入る）
 const unclassifiedDns = () => db.deliveries.filter(d => {

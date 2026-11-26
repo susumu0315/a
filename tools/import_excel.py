@@ -54,6 +54,17 @@ def product_name(v):
     return PRODUCT_NAMES.get(v, v)
 
 
+BILLING_STATUSES = ('未処理', '発行済', '送付済', '入金確認済')
+
+
+def billing_status(v):
+    """Excel の「請求書処理」をアプリの請求書の状況にそろえる（空・未処理以外の書き方は請求済みとみなす）"""
+    s = str(v or '').strip()
+    if s in BILLING_STATUSES:
+        return s
+    return '未処理' if s in ('', '未', '未処理', 'なし', '-', '－') else '発行済'
+
+
 def main(src, dst):
     wb = openpyxl.load_workbook(src, data_only=True)
 
@@ -98,12 +109,15 @@ def main(src, dst):
             price = PARTNER_PRICES.get(cname, {}).get(name, PRICES.get(name, ''))
             items.append({'id': uid(), 'name': name, 'spec': (r[4] or '').strip(), 'qty': r[5] or 0, 'unit': '個', 'price': price})
         cname, branch = split_branch(company)
+        bill_st = billing_status(billing)
         order = {'id': uid(), 'orderNo': f'JO-{odate[:4]}-{n:04d}', 'customerPoNo': '', 'customerId': partner(cname),
-                 'orderDate': odate, 'dueDate': due, 'answerDate': answer, 'staff': st, 'billing': billing or '未処理',
+                 'orderDate': odate, 'dueDate': due, 'answerDate': answer, 'staff': st, 'billing': bill_st,
                  'subject': branch, 'taxRate': 10, 'items': items, 'note': note, 'importedFrom': 'Excel 受注管理表 No.' + ','.join(str(r[0]) for r in g['rows'])}
         orders.append(order)
         if shipped:
+            # 請求はアプリに統一する。取り込んだ時点で請求書が処理済みの納品書は Excel で請求済みとして記録する
             deliveries.append({'id': uid(), 'orderId': order['id'], 'deliveryDate': shipped, 'subject': branch, 'taxRate': 10, 'note': '',
+                               'billedOutside': bill_st != '未処理',
                                'items': [{**it, 'id': uid(), 'ref': it['id']} for it in items]})
     deliveries.sort(key=lambda d: d['deliveryDate'])
     for n, d in enumerate(deliveries, 1):

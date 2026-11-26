@@ -103,9 +103,13 @@ function checkDoubleBilling_(rows, ops, dnOps) {
       if (dns[dnId].shipType === 'stock') throw new Error('請求書に、先方への在庫補充の納品書が含まれています。');
     }));
     const reports = {};
-    rows_(sheet_('salesReports')).forEach(r => { if (r[COL.id] !== '') reports[String(r[COL.id])] = true; });
+    rows_(sheet_('salesReports')).forEach(r => { if (r[COL.id] !== '') reports[String(r[COL.id])] = JSON.parse(r[COL.data]); });
     Object.keys(issuedNow).forEach(id => (bills[id].reportIds || []).forEach(rid => {
       if (!reports[rid]) throw new Error('請求書に、削除された販売実績が含まれています。');
+      const qty = (bills[id].reportQty || {})[rid];
+      if (qty !== undefined && Number(reports[rid].shipped || 0) !== Number(qty)) {
+        throw new Error('販売実績がほかの人に変更されています。最新の内容を読み込んでから発行してください。');
+      }
     }));
   }
   const owners = {};
@@ -124,12 +128,14 @@ function checkDoubleBilling_(rows, ops, dnOps) {
   });
 }
 
-// 発行済の請求書に入っている納品書は、その請求書を一緒に取消さないかぎり取消させない
-// （ほかの人がちょうど請求書を発行したときに、取消した納品書が請求書に残らないように）
-function checkVoidedDn_(rows, ops, billOps) {
+// 発行済の請求書に入っている納品書は、その請求書を一緒に取消さないかぎり、取消も在庫補充への変更もさせない
+// （ほかの人がちょうど請求書を発行したときに、取消した・在庫補充の納品書が請求書に残らないように）
+function checkDnChanges_(rows, ops, billOps) {
   const before = {};
   rows.forEach(r => { if (r[COL.id] !== '') before[String(r[COL.id])] = JSON.parse(r[COL.data]); });
-  const voided = ops.filter(op => !op.del && op.data.status === 'void' && before[op.id] && before[op.id].status !== 'void').map(op => op.id);
+  const voided = ops.filter(op => !op.del && before[op.id] && (
+    (op.data.status === 'void' && before[op.id].status !== 'void') ||
+    (op.data.shipType === 'stock' && before[op.id].shipType !== 'stock'))).map(op => op.id);
   if (!voided.length) return;
   const bills = {};
   rows_(sheet_('bills')).forEach(r => { if (r[COL.id] !== '') bills[String(r[COL.id])] = JSON.parse(r[COL.data]); });
@@ -137,15 +143,23 @@ function checkVoidedDn_(rows, ops, billOps) {
   Object.keys(bills).forEach(id => {
     const b = bills[id];
     if (b.status === 'issued' && (b.dnIds || []).some(dnId => voided.indexOf(dnId) >= 0)) {
-      throw new Error('この納品書は請求書（' + (b.billNo || '') + '）に入っています。最新の内容を読み込んでから取消してください。');
+      throw new Error('この納品書は請求書（' + (b.billNo || '') + '）に入っています。最新の内容を読み込んでから操作してください。');
     }
   });
 }
 
-// 発行済の請求書に入っている販売実績は、削除・数の変更をさせない
+// 発行済の請求書に入っている販売実績は、削除・数の変更をさせない。同じ取引先・月・色の重複も受け付けない
 function checkBilledReports_(rows, ops) {
   const before = {};
   rows.forEach(r => { if (r[COL.id] !== '') before[String(r[COL.id])] = JSON.parse(r[COL.data]); });
+  const after = Object.assign({}, before);
+  ops.forEach(op => { if (op.del) delete after[op.id]; else after[op.id] = op.data; });
+  const keys = {};
+  Object.keys(after).forEach(id => {
+    const k = [after[id].partnerId, after[id].month, after[id].color].join('|');
+    if (keys[k]) throw new Error('この月・色の販売実績はほかの人が先に登録しています。最新の内容を読み込んでから入力してください。');
+    keys[k] = true;
+  });
   const changed = ops.filter(op => before[op.id] && (op.del || !same_(before[op.id], op.data))).map(op => op.id);
   if (!changed.length) return;
   rows_(sheet_('bills')).forEach(r => {
@@ -249,7 +263,7 @@ function apiSave(json) {
         });
       }
       if (coll === 'bills') checkDoubleBilling_(rows, byColl[coll], byColl.deliveries || []);
-      if (coll === 'deliveries') checkVoidedDn_(rows, byColl[coll], byColl.bills || []);
+      if (coll === 'deliveries') checkDnChanges_(rows, byColl[coll], byColl.bills || []);
       if (coll === 'salesReports') checkBilledReports_(rows, byColl[coll]);
       return { coll, sh, rows, index };
     });
