@@ -1081,7 +1081,9 @@ function viewOrderForm(id, customerParam, prospectParam) {
       subject: f.subject.trim(), taxRate: toNum(f.taxRate), items, note: f.note,
       updatedAt: new Date().toISOString(),
     });
-    if (editing && o.billing !== editing.billing && !setBillingByHand(o, editing.billing, o.billing)) return;
+    if (editing && o.billing !== editing.billing && !setBillingByHand(o, editing.billing, o.billing)) {
+      return toast('保存をやめました（請求書の状況を元に戻すか、確認してからもう一度保存してください）', 'error');
+    }
     linkPartnerKind(o.customerId, 'customer');
     if (editing) db.orders[db.orders.indexOf(editing)] = o;
     else db.orders.push({ ...o, createdAt: o.updatedAt });
