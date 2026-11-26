@@ -1673,7 +1673,7 @@ function viewOrderForm(id, customerParam, prospectParam) {
       subject: f.subject.trim(), taxRate: toNum(f.taxRate), items, note: f.note,
       updatedAt: new Date().toISOString(),
     });
-    if (editing && f.billing !== editing.billing) delete o.billingByApp;
+    if (o.billing === '未処理') delete o.billingByApp;
     linkPartnerKind(o.customerId, 'customer');
     if (editing) db.orders[db.orders.indexOf(editing)] = o;
     else db.orders.push({ ...o, createdAt: o.updatedAt });
@@ -1732,7 +1732,7 @@ function viewOrderDetail(id) {
 
   $('[data-act=billing]').addEventListener('change', e => {
     o.billing = e.target.value;
-    delete o.billingByApp;
+    if (o.billing === '未処理') delete o.billingByApp;
     save();
     toast(`請求書を「${o.billing}」にしました`);
   });
@@ -2674,7 +2674,7 @@ function syncOrderBilling(orderIds) {
     // 移行した納品書がある受注の「発行済」は、Excel での請求の印のことがあるので、アプリで付けたときだけ戻す（二重請求を防ぐ）
     const migrated = dnsOf(o.id).some(d => isLive(d) && originDn(d).issuedBy === MIGRATED_BY);
     if (!billed && cur === '発行済' && (o.billingByApp || !migrated)) o.billing = '未処理';
-    if (o.billing !== '発行済') delete o.billingByApp;
+    if (o.billing === '未処理') delete o.billingByApp;
   });
 }
 const billOrderIds = b => b.dnIds.map(id => getDn(id)?.orderId).filter(Boolean);
@@ -2705,8 +2705,8 @@ function originDn(d) {
   return d;
 }
 // 以前のデータ（Excel）から移行した納品書（を再発行したもの）で、受注の請求書がすでに処理済みのもの（アプリの外で請求済み）
-const billedOutside = (d, o) => originDn(d).issuedBy === MIGRATED_BY && (o?.billing || '未処理') !== '未処理' &&
-  !(o.billing === '発行済' && o.billingByApp);
+// （アプリの請求書で状況を進めた受注 billingByApp は除く。送付済・入金確認済に進めても印は残す）
+const billedOutside = (d, o) => originDn(d).issuedBy === MIGRATED_BY && (o?.billing || '未処理') !== '未処理' && !o.billingByApp;
 // 販売実績表で請求する取引先の、納品の区分（直送／在庫補充）が未設定で、発行済の請求書に入っていない納品書（実績に入らない）。
 // アプリの外で請求済みの移行データも含める（区分を設定すると実績に入る）
 const unclassifiedDns = () => db.deliveries.filter(d => {

@@ -118,6 +118,24 @@ function checkDoubleBilling_(rows, ops, dnOps) {
   });
 }
 
+// 発行済の請求書に入っている納品書は、その請求書を一緒に取消さないかぎり取消させない
+// （ほかの人がちょうど請求書を発行したときに、取消した納品書が請求書に残らないように）
+function checkVoidedDn_(rows, ops, billOps) {
+  const before = {};
+  rows.forEach(r => { if (r[COL.id] !== '') before[String(r[COL.id])] = JSON.parse(r[COL.data]); });
+  const voided = ops.filter(op => !op.del && op.data.status === 'void' && before[op.id] && before[op.id].status !== 'void').map(op => op.id);
+  if (!voided.length) return;
+  const bills = {};
+  rows_(sheet_('bills')).forEach(r => { if (r[COL.id] !== '') bills[String(r[COL.id])] = JSON.parse(r[COL.data]); });
+  billOps.forEach(op => { if (op.del) delete bills[op.id]; else bills[op.id] = op.data; });
+  Object.keys(bills).forEach(id => {
+    const b = bills[id];
+    if (b.status === 'issued' && (b.dnIds || []).some(dnId => voided.indexOf(dnId) >= 0)) {
+      throw new Error('この納品書は請求書（' + (b.billNo || '') + '）に入っています。最新の内容を読み込んでから取消してください。');
+    }
+  });
+}
+
 function rows_(sh) {
   const n = sh.getLastRow() - 1;
   return n > 0 ? sh.getRange(2, 1, n, HEADER.length).getValues() : [];
@@ -210,6 +228,7 @@ function apiSave(json) {
         });
       }
       if (coll === 'bills') checkDoubleBilling_(rows, byColl[coll], byColl.deliveries || []);
+      if (coll === 'deliveries') checkVoidedDn_(rows, byColl[coll], byColl.bills || []);
       return { coll, sh, rows, index };
     });
 
