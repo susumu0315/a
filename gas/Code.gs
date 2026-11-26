@@ -100,6 +100,12 @@ function checkDoubleBilling_(rows, ops, dnOps) {
     dnOps.forEach(op => { if (op.del) delete dns[op.id]; else dns[op.id] = op.data; });
     Object.keys(issuedNow).forEach(id => (bills[id].dnIds || []).forEach(dnId => {
       if (!dns[dnId] || dns[dnId].status !== 'issued') throw new Error('請求書に、取消・未発行の納品書が含まれています。');
+      if (dns[dnId].shipType === 'stock') throw new Error('請求書に、先方への在庫補充の納品書が含まれています。');
+    }));
+    const reports = {};
+    rows_(sheet_('salesReports')).forEach(r => { if (r[COL.id] !== '') reports[String(r[COL.id])] = true; });
+    Object.keys(issuedNow).forEach(id => (bills[id].reportIds || []).forEach(rid => {
+      if (!reports[rid]) throw new Error('請求書に、削除された販売実績が含まれています。');
     }));
   }
   const owners = {};
@@ -132,6 +138,21 @@ function checkVoidedDn_(rows, ops, billOps) {
     const b = bills[id];
     if (b.status === 'issued' && (b.dnIds || []).some(dnId => voided.indexOf(dnId) >= 0)) {
       throw new Error('この納品書は請求書（' + (b.billNo || '') + '）に入っています。最新の内容を読み込んでから取消してください。');
+    }
+  });
+}
+
+// 発行済の請求書に入っている販売実績は、削除・数の変更をさせない
+function checkBilledReports_(rows, ops) {
+  const before = {};
+  rows.forEach(r => { if (r[COL.id] !== '') before[String(r[COL.id])] = JSON.parse(r[COL.data]); });
+  const changed = ops.filter(op => before[op.id] && (op.del || !same_(before[op.id], op.data))).map(op => op.id);
+  if (!changed.length) return;
+  rows_(sheet_('bills')).forEach(r => {
+    if (r[COL.id] === '') return;
+    const b = JSON.parse(r[COL.data]);
+    if (b.status === 'issued' && (b.reportIds || []).some(id => changed.indexOf(id) >= 0)) {
+      throw new Error('この販売実績は請求書（' + (b.billNo || '') + '）で請求済みのため、変更・削除できません。');
     }
   });
 }
@@ -229,6 +250,7 @@ function apiSave(json) {
       }
       if (coll === 'bills') checkDoubleBilling_(rows, byColl[coll], byColl.deliveries || []);
       if (coll === 'deliveries') checkVoidedDn_(rows, byColl[coll], byColl.bills || []);
+      if (coll === 'salesReports') checkBilledReports_(rows, byColl[coll]);
       return { coll, sh, rows, index };
     });
 
