@@ -1673,7 +1673,10 @@ function viewOrderForm(id, customerParam, prospectParam) {
       subject: f.subject.trim(), taxRate: toNum(f.taxRate), items, note: f.note,
       updatedAt: new Date().toISOString(),
     });
-    if (o.billing === '未処理') delete o.billingByApp;
+    if (o.billing === '未処理') {
+      delete o.billingByApp;
+      if (o.billedOutside) o.billedOutside = false;
+    }
     linkPartnerKind(o.customerId, 'customer');
     if (editing) db.orders[db.orders.indexOf(editing)] = o;
     else db.orders.push({ ...o, createdAt: o.updatedAt });
@@ -1732,7 +1735,10 @@ function viewOrderDetail(id) {
 
   $('[data-act=billing]').addEventListener('change', e => {
     o.billing = e.target.value;
-    if (o.billing === '未処理') delete o.billingByApp;
+    if (o.billing === '未処理') {
+      delete o.billingByApp;
+      if (o.billedOutside) o.billedOutside = false;
+    }
     save();
     toast(`請求書を「${o.billing}」にしました`);
   });
@@ -2708,13 +2714,12 @@ function originDn(d) {
   return d;
 }
 // 以前のデータ（Excel）から移行した納品書（を再発行したもの）で、受注の請求書がすでに処理済みのもの（アプリの外で請求済み）
-// 取り込みツールが、取り込んだ時点の状況を納品書に記録している（billedOutside）。記録のない古い取り込みデータは、
-// 受注の今の状況で決める（アプリの請求書で状況を進めた受注 billingByApp は除く）
+// 取り込みツールが、取り込んだ時点で請求済みの受注に印（billedOutside）を付けている。その受注の納品書は
+// （取り込んだ後にアプリで作ったものも）請求しない。印のない古い取り込みデータは、移行した納品書について受注の今の状況で決める
+// （アプリの請求書で状況を進めた受注 billingByApp は除く）
 const billedOutside = (d, o) => {
-  const src = originDn(d);
-  if (src.issuedBy !== MIGRATED_BY) return false;
-  if (typeof src.billedOutside === 'boolean') return src.billedOutside;
-  return (o?.billing || '未処理') !== '未処理' && !o.billingByApp;
+  if (typeof o?.billedOutside === 'boolean') return o.billedOutside;
+  return originDn(d).issuedBy === MIGRATED_BY && (o?.billing || '未処理') !== '未処理' && !o.billingByApp;
 };
 // 販売実績表で請求する取引先の、納品の区分（直送／在庫補充）が未設定で、発行済の請求書に入っていない納品書（実績に入らない）。
 // アプリの外で請求済みの移行データも含める（区分を設定すると実績に入る）

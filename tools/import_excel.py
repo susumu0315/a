@@ -57,12 +57,18 @@ def product_name(v):
 BILLING_STATUSES = ('未処理', '発行済', '送付済', '入金確認済')
 
 
+UNKNOWN_BILLING = {}  # アプリの 4 種類以外だった「請求書処理」の値と、読み替えた状況
+
+
 def billing_status(v):
-    """Excel の「請求書処理」をアプリの請求書の状況にそろえる（空・未処理以外の書き方は請求済みとみなす）"""
+    """Excel の「請求書処理」をアプリの請求書の状況にそろえる（空や「未」を含む値は未処理、それ以外は発行済）"""
     s = str(v or '').strip()
     if s in BILLING_STATUSES:
         return s
-    return '未処理' if s in ('', '未', '未処理', 'なし', '-', '－') else '発行済'
+    st = '未処理' if s in ('', 'なし', '-', '－') or '未' in s else '発行済'
+    if s:
+        UNKNOWN_BILLING[s] = st
+    return st
 
 
 def main(src, dst):
@@ -110,14 +116,14 @@ def main(src, dst):
             items.append({'id': uid(), 'name': name, 'spec': (r[4] or '').strip(), 'qty': r[5] or 0, 'unit': '個', 'price': price})
         cname, branch = split_branch(company)
         bill_st = billing_status(billing)
+        # 請求はアプリに統一する。取り込んだ時点で請求書が処理済みの受注は Excel で請求済みとして印を付ける
         order = {'id': uid(), 'orderNo': f'JO-{odate[:4]}-{n:04d}', 'customerPoNo': '', 'customerId': partner(cname),
                  'orderDate': odate, 'dueDate': due, 'answerDate': answer, 'staff': st, 'billing': bill_st,
+                 'billedOutside': bill_st != '未処理',
                  'subject': branch, 'taxRate': 10, 'items': items, 'note': note, 'importedFrom': 'Excel 受注管理表 No.' + ','.join(str(r[0]) for r in g['rows'])}
         orders.append(order)
         if shipped:
-            # 請求はアプリに統一する。取り込んだ時点で請求書が処理済みの納品書は Excel で請求済みとして記録する
             deliveries.append({'id': uid(), 'orderId': order['id'], 'deliveryDate': shipped, 'subject': branch, 'taxRate': 10, 'note': '',
-                               'billedOutside': bill_st != '未処理',
                                'items': [{**it, 'id': uid(), 'ref': it['id']} for it in items]})
     deliveries.sort(key=lambda d: d['deliveryDate'])
     for n, d in enumerate(deliveries, 1):
@@ -168,6 +174,10 @@ def main(src, dst):
     received = collections.Counter()
     for r in receipts:
         received[r['color']] += r['qty']
+    if UNKNOWN_BILLING:
+        print('「請求書処理」を次のように読み替えました（発行済＝Excel で請求済み。違う場合はアプリの受注の画面で直してください）：')
+        for k, v in UNKNOWN_BILLING.items():
+            print(f'  {k} → {v}')
     print(f'受注 {len(orders)} 件（Excel {len(rows)} 行）／納品書 {len(deliveries)} 件／取引先 {len(partners)} 社／'
           f'商品 {len(products)} 品／見込み案件 {len(prospects)} 件')
     print('色\tアプリ現在庫\tExcel現在庫\tアプリ有効在庫\tExcel有効在庫')

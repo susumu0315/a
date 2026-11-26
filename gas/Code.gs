@@ -98,9 +98,13 @@ function checkDoubleBilling_(rows, ops, dnOps) {
     const dns = {};
     rows_(sheet_('deliveries')).forEach(r => { if (r[COL.id] !== '') dns[String(r[COL.id])] = JSON.parse(r[COL.data]); });
     dnOps.forEach(op => { if (op.del) delete dns[op.id]; else dns[op.id] = op.data; });
+    const orders = {};
+    rows_(sheet_('orders')).forEach(r => { if (r[COL.id] !== '') orders[String(r[COL.id])] = JSON.parse(r[COL.data]); });
     Object.keys(issuedNow).forEach(id => (bills[id].dnIds || []).forEach(dnId => {
       if (!dns[dnId] || dns[dnId].status !== 'issued') throw new Error('請求書に、取消・未発行の納品書が含まれています。');
       if (dns[dnId].shipType === 'stock') throw new Error('請求書に、先方への在庫補充の納品書が含まれています。');
+      const o = orders[dns[dnId].orderId];
+      if (o && o.billedOutside === true) throw new Error('請求書に、Excel で請求済みの受注（' + (o.orderNo || '') + '）の納品書が含まれています。');
     }));
     const reports = {};
     rows_(sheet_('salesReports')).forEach(r => { if (r[COL.id] !== '') reports[String(r[COL.id])] = JSON.parse(r[COL.data]); });
@@ -154,11 +158,13 @@ function checkBilledReports_(rows, ops) {
   rows.forEach(r => { if (r[COL.id] !== '') before[String(r[COL.id])] = JSON.parse(r[COL.data]); });
   const after = Object.assign({}, before);
   ops.forEach(op => { if (op.del) delete after[op.id]; else after[op.id] = op.data; });
-  const keys = {};
-  Object.keys(after).forEach(id => {
-    const k = [after[id].partnerId, after[id].month, after[id].color].join('|');
-    if (keys[k]) throw new Error('この月・色の販売実績はほかの人が先に登録しています。最新の内容を読み込んでから入力してください。');
-    keys[k] = true;
+  const keyOf = x => [x.partnerId, x.month, x.color].join('|');
+  ops.forEach(op => {
+    if (op.del || (before[op.id] && keyOf(before[op.id]) === keyOf(op.data))) return;
+    const k = keyOf(op.data);
+    if (Object.keys(after).some(id => id !== op.id && keyOf(after[id]) === k)) {
+      throw new Error('この月・色の販売実績はほかの人が先に登録しています。最新の内容を読み込んでから入力してください。');
+    }
   });
   const changed = ops.filter(op => before[op.id] && (op.del || !same_(before[op.id], op.data))).map(op => op.id);
   if (!changed.length) return;
