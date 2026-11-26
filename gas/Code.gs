@@ -85,7 +85,7 @@ function checkLocked_(coll, before, after) {
 // 発行する請求書の納品書が、ほかの人に取消されていないかも確認する
 function checkDoubleBilling_(rows, ops, dnOps) {
   const bills = {};
-  rows.forEach(r => { bills[String(r[COL.id])] = JSON.parse(r[COL.data]); });
+  rows.forEach(r => { if (r[COL.id] !== '') bills[String(r[COL.id])] = JSON.parse(r[COL.data]); });
   const issuedNow = {};
   ops.forEach(op => {
     if (!op.del && op.data.status === 'issued' && (!bills[op.id] || bills[op.id].status !== 'issued')) issuedNow[op.id] = true;
@@ -96,7 +96,7 @@ function checkDoubleBilling_(rows, ops, dnOps) {
   });
   if (Object.keys(issuedNow).length) {
     const dns = {};
-    rows_(sheet_('deliveries')).forEach(r => { dns[String(r[COL.id])] = JSON.parse(r[COL.data]); });
+    rows_(sheet_('deliveries')).forEach(r => { if (r[COL.id] !== '') dns[String(r[COL.id])] = JSON.parse(r[COL.data]); });
     dnOps.forEach(op => { if (op.del) delete dns[op.id]; else dns[op.id] = op.data; });
     Object.keys(issuedNow).forEach(id => (bills[id].dnIds || []).forEach(dnId => {
       if (!dns[dnId] || dns[dnId].status !== 'issued') throw new Error('請求書に、取消・未発行の納品書が含まれています。');

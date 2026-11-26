@@ -1340,6 +1340,9 @@ function billIssueError(b) {
     (x.dnIds.some(id => b.dnIds.includes(id)) || (x.reportIds || []).some(id => (b.reportIds || []).includes(id))));
   if (dup) return `この請求書の納品書・出荷実績は、請求書 ${dup.billNo} で請求済みです。この請求書は削除してください`;
   if (b.dnIds.some(id => stateOf(getDn(id) || {}) !== 'issued')) return '取消・未発行の納品書が含まれています';
+  if (usesSalesReport(getPartner(b.partnerId)) && b.dnIds.some(id => !getDn(id).shipType)) {
+    return '納品の区分（直送／在庫補充）が未設定の納品書が含まれています。納品書の画面で区分を設定してください';
+  }
   if (b.dnIds.some(id => getDn(id).items.some(noPriceLine))) {
     return '単価が入っていない納品書があります。その納品書を「取消」して単価を入れて再発行してから、請求書を作り直してください';
   }
@@ -1411,13 +1414,6 @@ function migrateIssued() {
     d.snap = buildModel(type, d);
     changed = true;
   }));
-  // 移行した納品書が、アプリの外（Excel）で請求済みかを記録する。受注の請求書の状況はアプリでの発行・取消で
-  // 変わるため、記録していない納品書は今の状況で決める（アプリで請求した分が混ざっていても、二重請求しない側に倒す）
-  db.deliveries.forEach(d => {
-    if (d.issuedBy !== MIGRATED_BY || d.billedOutside !== undefined) return;
-    d.billedOutside = (getOrder(d.orderId)?.billing || '未処理') !== '未処理';
-    changed = true;
-  });
   return changed;
 }
 
@@ -1906,6 +1902,7 @@ function bindSalesReport(p, rerender) {
 // ---------- 請求書（1 枚に 1 件以上の納品書をまとめる） ----------
 const getBill = id => db.bills.find(b => b.id === id);
 const billsOfDn = dnId => db.bills.filter(b => b.dnIds.includes(dnId));
+const inIssuedBill = dnId => billsOfDn(dnId).some(b => stateOf(b) === 'issued');
 const liveBillOfDn = dnId => {
   const live = billsOfDn(dnId).filter(isLive);
   return live.find(b => stateOf(b) === 'issued') || live[0];
@@ -2076,10 +2073,11 @@ function voidReceipt(b, reason) {
 // 請求書の発行・取消に合わせて、受注の請求書の状況（未処理 ⇄ 発行済）を更新する
 function syncOrderBilling(orderIds) {
   [...new Set(orderIds)].map(getOrder).filter(Boolean).forEach(o => {
-    const billed = dnsOf(o.id).some(d => billsOfDn(d.id).some(b => stateOf(b) === 'issued'));
+    const billed = dnsOf(o.id).some(d => inIssuedBill(d.id));
     const cur = o.billing || '未処理';
     if (billed && cur === '未処理') o.billing = '発行済';
-    if (!billed && cur === '発行済') o.billing = '未処理';
+    // 移行した納品書がある受注は、「発行済」が Excel での請求の印のこともあるので戻さない（二重請求を防ぐ。必要なら受注の画面で変更）
+    if (!billed && cur === '発行済' && !dnsOf(o.id).some(d => originDn(d).issuedBy === MIGRATED_BY)) o.billing = '未処理';
   });
 }
 const billOrderIds = b => b.dnIds.map(id => getDn(id)?.orderId).filter(Boolean);
@@ -2100,13 +2098,22 @@ function cascadeDnVoid(d) {
   });
 }
 
-// 以前のデータ（Excel）から移行した納品書で、アプリの外で請求済みのもの（移行したときに記録。migrateIssued）
-const billedOutside = d => d.issuedBy === MIGRATED_BY && !!d.billedOutside;
+// 再発行のもとをたどった、最初の納品書
+function originDn(d) {
+  for (let i = 0; i < 50 && d?.reissueOf; i++) {
+    const prev = getDn(d.reissueOf);
+    if (!prev) break;
+    d = prev;
+  }
+  return d;
+}
+// 以前のデータ（Excel）から移行した納品書（を再発行したもの）で、受注の請求書がすでに処理済みのもの（アプリの外で請求済み）
+const billedOutside = (d, o) => originDn(d).issuedBy === MIGRATED_BY && (o?.billing || '未処理') !== '未処理';
 // 販売実績表で請求する取引先の、納品の区分（直送／在庫補充）が未設定で、発行済の請求書に入っていない納品書（実績に入らない）。
 // アプリの外で請求済みの移行データも含める（区分を設定すると実績に入る）
 const unclassifiedDns = () => db.deliveries.filter(d => {
   const o = getOrder(d.orderId);
-  return stateOf(d) === 'issued' && !d.shipType && usesSalesReport(getPartner(o?.customerId)) && !billsOfDn(d.id).some(b => stateOf(b) === 'issued');
+  return stateOf(d) === 'issued' && !d.shipType && usesSalesReport(getPartner(o?.customerId)) && !inIssuedBill(d.id);
 });
 
 // 請求書をまだ作っていない（発行済の）納品書を、取引先のルールでまとめた候補
@@ -2122,7 +2129,7 @@ function billCandidates() {
     const p = getPartner(o?.customerId);
     if (!p) return;
     // 以前のデータ（Excel）から移行した納品書で、受注の請求書がすでに処理済みのものはアプリの外で請求済み
-    if (billedOutside(d)) return;
+    if (billedOutside(d, o)) return;
     if (usesSalesReport(p) && !d.shipType) return; // 区分（直送／在庫補充）が決まるまで請求しない
     const r = ruleOf(p);
     let key; let target; let ready; let extra = {};
@@ -2209,7 +2216,7 @@ function viewBills() {
       <div><div class="crumb">ステップ ④</div><h1>請求書</h1></div>
     </div>
     <p class="hint" style="margin:-8px 0 14px">発行済の納品書を、取引先ごとの請求書のルール（納品ごと・受注ごと・締め日でまとめる）で請求書にします。ルールは「取引先」の編集画面で変更できます。</p>
-    ${(() => { const u = unclassifiedDns(); return u.length ? `<div class="banner">納品の区分（直送／在庫補充）が未設定のため、請求書・実績に入れていない納品書があります：
+    ${(() => { const u = unclassifiedDns(); return u.length ? `<div class="banner">納品の区分（直送／在庫補充）が未設定の納品書があります（区分を設定するまで、請求書の発行・実績に入りません）：
       ${u.map(d => `<a href="#/deliveries/${d.id}">${esc(d.dnNo)}</a>`).join('、')}。納品書の画面で区分を設定してください。</div>` : ''; })()}
     <section class="card">
       <h2>請求書を作る（まだ請求書にしていない納品書）</h2>
@@ -2784,7 +2791,7 @@ const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 function billableDn(d) {
   if (stateOf(d) !== 'issued' || d.shipType === 'stock') return false;
   const o = getOrder(d.orderId);
-  return !!o && (!!d.shipType || !usesSalesReport(getPartner(o.customerId)) || billsOfDn(d.id).some(b => stateOf(b) === 'issued'));
+  return !!o && (!!d.shipType || !usesSalesReport(getPartner(o.customerId)) || inIssuedBill(d.id));
 }
 // 出荷実績の単価：請求書を発行済みならその単価、まだなら取引先の今の単価
 function reportPrice(r) {
@@ -3018,10 +3025,12 @@ function viewAnalytics(q) {
 
 // 取引先の画面に出す、その取引先の実績
 function partnerSalesHTML(pid) {
-  const facts = salesFacts().filter(f => f.partnerId === pid);
+  let facts = salesFacts().filter(f => f.partnerId === pid);
   if (!facts.length) return '';
   const { first, last } = salesSpan(facts);
-  const { html: chart } = monthlyChart(monthRange(first, last), facts);
+  const months = monthRange(first, last);
+  facts = facts.filter(f => f.month >= months[0]);
+  const { html: chart } = monthlyChart(months, facts);
   const byColor = sumBy(facts.filter(f => f.color), 'color').sort((a, b) => b.qty - a.qty);
   const total = facts.reduce((a, f) => a + f.amount, 0);
   return `<section class="card">
