@@ -871,6 +871,7 @@ async function reload({ keepSame = false, apply } = {}) {
   revs = nextRevs;
   synced = empty ? {} : snapshot(raw);
   if (keepSame && !empty && JSON.stringify(snapshot(next)) === JSON.stringify(snapshot(db))) {
+    save(); // スプレッドシートの内容と、補完した今のデータとの違いがあれば書き込む
     setSync();
     return false;
   }
@@ -2002,6 +2003,13 @@ function migrateIssued() {
     d.snap = buildModel(type, d);
     changed = true;
   }));
+  // 移行した納品書が、アプリの外（Excel）で請求済みかを記録する。受注の請求書の状況はアプリでの発行・取消で
+  // 変わるため、記録していない納品書は今の状況で決める（アプリで請求した分が混ざっていても、二重請求しない側に倒す）
+  db.deliveries.forEach(d => {
+    if (d.issuedBy !== MIGRATED_BY || d.billedOutside !== undefined) return;
+    d.billedOutside = (getOrder(d.orderId)?.billing || '未処理') !== '未処理';
+    changed = true;
+  });
   return changed;
 }
 
@@ -2684,15 +2692,13 @@ function cascadeDnVoid(d) {
   });
 }
 
-// 以前のデータ（Excel）から移行した納品書で、受注の請求書がすでに処理済みのもの（アプリの外で請求済み）。
-// アプリで請求書を発行した受注は、その発行で「発行済」になっているので外での請求とはみなさない
-const billedOutside = (d, o) => d.issuedBy === MIGRATED_BY && (o?.billing || '未処理') !== '未処理' &&
-  !dnsOf(o.id).some(x => billsOfDn(x.id).some(b => stateOf(b) === 'issued'));
-// 販売実績表で請求する取引先の、納品の区分（直送／在庫補充）が未設定の発行済納品書（請求書にも実績にも入らない）。
+// 以前のデータ（Excel）から移行した納品書で、アプリの外で請求済みのもの（移行したときに記録。migrateIssued）
+const billedOutside = d => d.issuedBy === MIGRATED_BY && !!d.billedOutside;
+// 販売実績表で請求する取引先の、納品の区分（直送／在庫補充）が未設定で、発行済の請求書に入っていない納品書（実績に入らない）。
 // アプリの外で請求済みの移行データも含める（区分を設定すると実績に入る）
 const unclassifiedDns = () => db.deliveries.filter(d => {
   const o = getOrder(d.orderId);
-  return stateOf(d) === 'issued' && !d.shipType && usesSalesReport(getPartner(o?.customerId)) && !liveBillOfDn(d.id);
+  return stateOf(d) === 'issued' && !d.shipType && usesSalesReport(getPartner(o?.customerId)) && !billsOfDn(d.id).some(b => stateOf(b) === 'issued');
 });
 
 // 請求書をまだ作っていない（発行済の）納品書を、取引先のルールでまとめた候補
@@ -2708,7 +2714,7 @@ function billCandidates() {
     const p = getPartner(o?.customerId);
     if (!p) return;
     // 以前のデータ（Excel）から移行した納品書で、受注の請求書がすでに処理済みのものはアプリの外で請求済み
-    if (billedOutside(d, o)) return;
+    if (billedOutside(d)) return;
     if (usesSalesReport(p) && !d.shipType) return; // 区分（直送／在庫補充）が決まるまで請求しない
     const r = ruleOf(p);
     let key; let target; let ready; let extra = {};
@@ -3370,7 +3376,7 @@ const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 function billableDn(d) {
   if (stateOf(d) !== 'issued' || d.shipType === 'stock') return false;
   const o = getOrder(d.orderId);
-  return !!o && (!!d.shipType || !usesSalesReport(getPartner(o.customerId)) || !!liveBillOfDn(d.id));
+  return !!o && (!!d.shipType || !usesSalesReport(getPartner(o.customerId)) || billsOfDn(d.id).some(b => stateOf(b) === 'issued'));
 }
 // 出荷実績の単価：請求書を発行済みならその単価、まだなら取引先の今の単価
 function reportPrice(r) {
