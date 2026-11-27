@@ -2531,7 +2531,8 @@ function salesReportHTML(p) {
   return `<section class="card">
     <h2>販売実績（先方の在庫からの出荷実績）</h2>
     <p class="hint" style="margin:-6px 0 10px">この取引先は「販売実績表」で請求します。請求する数 ＝ 直送分（納品の区分「直送」の納品書）＋ 先方の出荷実績。先方への在庫補充分は請求しません。
-      毎月の販売実績表を読み込むか、出荷実績を入力してください。締め日の請求書に自動で入ります。</p>
+      毎月の販売実績表を読み込むか、出荷実績を入力してください。締め日の請求書に自動で入ります。<br>
+      販売実績表に「在庫〇個ミカド電子様へ返却」などの記載があるときは、戻ってきた数を<a href="#/stock">在庫</a>の画面で入庫として登録してください（請求の数は変わりません）。</p>
     <div class="actions" style="margin-bottom:12px">
       <label class="btn btn-primary">⬆ 販売実績表（Excel）を読み込む<input type="file" accept=".xls,.xlsx" data-act="report-file" hidden></label>
     </div>
@@ -3818,8 +3819,24 @@ function viewStock() {
       </form>
     </section>
     <section class="card">
+      <h2>棚卸（実在庫に合わせる）</h2>
+      <p class="hint" style="margin:-6px 0 10px">倉庫で数えた実際の在庫を入力すると、アプリの現在庫との差を「棚卸の調整」として入庫記録に登録します（多ければプラス、少なければマイナス）。
+        数えた色だけ入力してください。棚卸の日より後の納品書・入庫は、ふだんどおり在庫に反映されます。</p>
+      <form id="count-form" autocomplete="off">
+        <div class="field" style="max-width:220px"><label>棚卸日</label><input type="date" name="date" value="${today()}"></div>
+        <div class="table-wrap"><table class="list stock">
+          <thead><tr><th>色</th><th class="num">アプリの現在庫</th><th class="num">実在庫（数えた数）</th><th class="num">差</th></tr></thead>
+          <tbody>${rows.map(r => `<tr><td><b>${esc(r.color)}</b></td><td class="num">${num(r.current)}</td>
+            <td class="num"><input type="number" step="1" min="0" class="num" data-count="${esc(r.color)}" data-current="${r.current}" placeholder="—"></td>
+            <td class="num" data-diff="${esc(r.color)}"><span class="muted">—</span></td></tr>`).join('')}</tbody>
+        </table></div>
+        <div class="actions" style="margin-top:12px"><button class="btn btn-primary" type="submit">差を棚卸の調整として登録</button></div>
+      </form>
+    </section>
+    <section class="card">
       <h2>入庫を登録</h2>
-      <p class="hint" style="margin:-6px 0 10px">仕入・生産などで在庫が増えたときに登録します。「入庫累計」に加算されます。</p>
+      <p class="hint" style="margin:-6px 0 10px">仕入・生産などで在庫が増えたときに登録します。「入庫累計」に加算されます。
+        ジーエムなどに預けた在庫が戻ってきたとき（販売実績表の「返却」）も、ここで入庫として登録します（備考の例：ジーエムから返却）。</p>
       <form id="receipt-form" class="grid-4" autocomplete="off">
         <div class="field"><label>入庫日</label><input type="date" name="date" value="${today()}"></div>
         <div class="field"><label>色 <span class="req">必須</span></label><select name="color">${colorOptions('')}</select></div>
@@ -3846,6 +3863,27 @@ function viewStock() {
     db.stock = { opening, reorder };
     save();
     toast('期首在庫・発注点を保存しました');
+    viewStock();
+  });
+  const countDiff = i => (i.value === '' ? null : toNum(i.value) - toNum(i.dataset.current));
+  $$('[data-count]').forEach(i => i.addEventListener('input', () => {
+    const d = countDiff(i);
+    const cell = $(`[data-diff="${CSS.escape(i.dataset.count)}"]`);
+    cell.innerHTML = d == null ? '<span class="muted">—</span>' : d ? `<b>${d > 0 ? '+' : ''}${num(d)}</b>` : '<span class="muted">差なし</span>';
+  }));
+  $('#count-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const date = e.target.elements.date.value;
+    if (!date) return toast('棚卸日を入力してください', 'error');
+    const inputs = $$('[data-count]').filter(i => i.value !== '');
+    if (!inputs.length) return toast('数えた色の実在庫を入力してください', 'error');
+    if (inputs.some(i => toNum(i.value) < 0)) return toast('実在庫は 0 以上で入力してください', 'error');
+    const adj = inputs.map(i => ({ color: i.dataset.count, count: toNum(i.value), current: toNum(i.dataset.current), diff: countDiff(i) })).filter(x => x.diff);
+    if (!adj.length) return toast('入力した色は、すべてアプリの現在庫と同じです（登録するものはありません）');
+    if (!confirm(`次の差を ${date} の棚卸の調整として登録します。\n${adj.map(x => `${x.color}：${x.diff > 0 ? '+' : ''}${num(x.diff)}（アプリ ${num(x.current)} → 実在庫 ${num(x.count)}）`).join('\n')}\nよろしいですか？`)) return;
+    adj.forEach(x => db.receipts.push({ id: uid(), date, color: x.color, qty: x.diff, note: `棚卸の調整（実在庫 ${x.count}・アプリ ${x.current}）`, kind: 'stocktake' }));
+    save();
+    toast(`棚卸の調整を ${adj.length} 色登録しました`);
     viewStock();
   });
   $('#receipt-form').addEventListener('submit', e => {
