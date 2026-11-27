@@ -390,6 +390,8 @@ table.list.compact th, table.list.compact td { padding-top: 6px; padding-bottom:
 .analytics-2 { align-items: start; }
 .inv-note { font-size: 8.5pt; margin: 0; }
 .no-tag.is-inv { background: #fdf2e3; color: #9a5b00; }
+.no-tag.is-quote { background: #e2f3f5; color: #0e6b78; }
+.number-field.is-quote .number-pending { border-color: #0e6b78; }
 table.doc-lines tr.grp td { background: #f3f5f8; font-weight: 700; font-size: 9pt; padding: 1mm 2mm; height: auto; }
 .rule-title { margin: 18px 0 8px; font-size: 1rem; border-top: 1px solid var(--line); padding-top: 14px; }
 .price-rows { display: flex; flex-direction: column; gap: 6px; }

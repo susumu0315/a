@@ -398,6 +398,8 @@ table.list.compact th, table.list.compact td { padding-top: 6px; padding-bottom:
 .analytics-2 { align-items: start; }
 .inv-note { font-size: 8.5pt; margin: 0; }
 .no-tag.is-inv { background: #fdf2e3; color: #9a5b00; }
+.no-tag.is-quote { background: #e2f3f5; color: #0e6b78; }
+.number-field.is-quote .number-pending { border-color: #0e6b78; }
 table.doc-lines tr.grp td { background: #f3f5f8; font-weight: 700; font-size: 9pt; padding: 1mm 2mm; height: auto; }
 .rule-title { margin: 18px 0 8px; font-size: 1rem; border-top: 1px solid var(--line); padding-top: 14px; }
 .price-rows { display: flex; flex-direction: column; gap: 6px; }
@@ -514,6 +516,7 @@ label.check input { width: auto; }
         <a href="#/analytics" data-nav="analytics"><span class="nav-step">↗</span>実績</a>
         <a href="#/stock" data-nav="stock"><span class="nav-step">▦</span>在庫</a>
         <a href="#/prospects" data-nav="prospects"><span class="nav-step">☆</span>見込み案件</a>
+        <a href="#/quotes" data-nav="quotes"><span class="nav-step">✎</span>見積書</a>
         <a href="#/partners" data-nav="partners"><span class="nav-step">◎</span>取引先</a>
         <a href="#/masters" data-nav="masters"><span class="nav-step">▤</span>商品・色・担当</a>
         <a href="#/settings" data-nav="settings"><span class="nav-step">⚙</span>設定</a>
@@ -683,7 +686,9 @@ function defaultData() {
       showLogo: true,
       paymentTerms: '月末締め翌月末現金振込',
       taxRate: 10,
-      prefix: { order: 'JO', po: 'PO', dn: 'DN', inv: 'IV', rc: 'RC' },
+      prefix: { order: 'JO', po: 'PO', dn: 'DN', inv: 'IV', rc: 'RC', quote: 'QT' },
+      quoteValidDays: 30, // 見積書の有効期限（見積日から何日）
+      quoteNote: '「送料」は元払いです。', // 見積書の備考の初期値
       dueWarnDays: 3, // 納期まで何日以内で警告するか
       bankAccount: BANK_DEFAULT, // 請求書に印字する振込先
       invoiceNote: '※振込手数料のご負担をお願いいたします。', // 請求書の振込先の下に印字する注記
@@ -703,6 +708,7 @@ function defaultData() {
     logs: [], // 書類の発行・取消の操作履歴
     bills: [], // 請求書（1 件以上の納品書をまとめる）
     salesReports: [], // 販売実績表の出荷実績（月・色ごと）
+    quotes: [], // 見積書
   };
 }
 
@@ -760,7 +766,7 @@ let db = REMOTE ? defaultData() : load();
 
 // ---------- スプレッドシートとの同期（Apps Script 配信時のみ） ----------
 // レコードを持つ一覧と、1 件だけの設定値。スプレッドシートではそれぞれ 1 シートになる
-const COLLS = ['partners', 'products', 'orders', 'pos', 'deliveries', 'receipts', 'prospects', 'logs', 'bills', 'salesReports'];
+const COLLS = ['partners', 'products', 'orders', 'pos', 'deliveries', 'receipts', 'prospects', 'logs', 'bills', 'salesReports', 'quotes'];
 const CONFIG_KEYS = ['version', 'settings', 'colors', 'staff', 'stock'];
 let synced = {}; // 最後にサーバーと一致していた内容 { 一覧: { id: JSON } }
 let revs = {}; // サーバー側の版 { 一覧: { id: rev } }。他の人の更新との衝突検知に使う
@@ -791,6 +797,7 @@ function recordLabel(coll, id, r) {
     case 'deliveries': return `${r.dnNo || '下書き'}｜${DOC_STATE[stateOf(r)].label}｜${r.deliveryDate}｜${partnerName(getOrder(r.orderId)?.customerId)}｜${items}`;
     case 'bills': return `${r.billNo || '下書き'}｜${DOC_STATE[stateOf(r)].label}｜${r.invoiceDate}｜${partnerName(r.partnerId)}｜納品書 ${r.dnIds.length} 件`;
     case 'salesReports': return `${r.month}｜${partnerName(r.partnerId)}｜${r.color}｜出荷実績 ${r.shipped}`;
+    case 'quotes': return `${r.quoteNo || '下書き'}｜${DOC_STATE[stateOf(r)].label}｜${r.quoteDate}｜${partnerName(r.partnerId)}｜${items}`;
     case 'logs': return `${r.at}｜${r.action}｜${DOC_TITLE[r.docType] || ''} ${r.no}｜${r.by}${r.reason ? '｜' + r.reason : ''}`;
     case 'receipts': return `${r.date}｜${r.color}｜${r.qty}`;
     case 'prospects': return `${r.date}｜${r.company}｜${r.product}｜${r.color || ''}×${r.qty}`;
@@ -922,8 +929,8 @@ async function refreshIfIdle() {
   }
 }
 
-const NO_FIELD = { order: 'orderNo', po: 'poNo', dn: 'dnNo', bill: 'billNo' };
-const listOf = kind => ({ order: db.orders, po: db.pos, dn: db.deliveries, bill: db.bills }[kind]);
+const NO_FIELD = { order: 'orderNo', po: 'poNo', dn: 'dnNo', bill: 'billNo', quote: 'quoteNo' };
+const listOf = kind => ({ order: db.orders, po: db.pos, dn: db.deliveries, bill: db.bills, quote: db.quotes }[kind]);
 
 // 「接頭辞-西暦-連番」で次の番号を採番（例：JO-2026-0001）
 function nextNo(kind) {
@@ -941,6 +948,7 @@ function nextNo(kind) {
 const getOrder = id => db.orders.find(o => o.id === id);
 const getPo = id => db.pos.find(p => p.id === id);
 const getDn = id => db.deliveries.find(d => d.id === id);
+const getQuote = id => db.quotes.find(q => q.id === id);
 const getPartner = id => db.partners.find(p => p.id === id);
 const partnerName = id => getPartner(id)?.name || '（未設定）';
 const posOf = orderId => db.pos.filter(p => p.orderId === orderId).sort(byField('poNo'));
@@ -1123,7 +1131,11 @@ function remainingItems(order, excludeDnId) {
 const routes = [
   [/^\/$/, viewDashboard],
   [/^\/orders$/, (m, q) => viewOrderList(q)],
-  [/^\/orders\/new$/, (m, q) => viewOrderForm(null, q.get('customer'), q.get('prospect'), q.get('parent'))],
+  [/^\/orders\/new$/, (m, q) => viewOrderForm(null, q.get('customer'), q.get('prospect'), q.get('parent'), q.get('quote'))],
+  [/^\/quotes$/, (m, q) => viewQuoteList(q)],
+  [/^\/quotes\/new$/, (m, q) => viewQuoteForm(null, q.get('prospect'), q.get('partner'))],
+  [/^\/quotes\/([^/]+)\/edit$/, m => viewQuoteForm(m[1])],
+  [/^\/quotes\/([^/]+)$/, m => viewQuoteDetail(m[1])],
   [/^\/orders\/([^/]+)\/edit$/, m => viewOrderForm(m[1])],
   [/^\/orders\/([^/]+)$/, m => viewOrderDetail(m[1])],
   [/^\/pos$/, () => viewDocList('po')],
@@ -1581,10 +1593,15 @@ function orderDescendantIds(o) {
   return ids;
 }
 
-function viewOrderForm(id, customerParam, prospectParam, parentParam) {
+function viewOrderForm(id, customerParam, prospectParam, parentParam, quoteParam) {
   const editing = id ? getOrder(id) : null;
   if (id && !editing) return notFound();
-  const pr = !editing && prospectParam ? db.prospects.find(x => x.id === prospectParam) : null;
+  const fromQuote = !editing && quoteParam ? getQuote(quoteParam) : null;
+  if (fromQuote && (stateOf(fromQuote) !== 'issued' || (fromQuote.orderId && getOrder(fromQuote.orderId)))) {
+    return render(`<div class="card empty">この見積書からは受注を登録できません（発行済で、まだ受注になっていない見積書だけが対象です）。<br>
+      <a class="btn" href="#/quotes/${fromQuote.id}">見積書の画面へ戻る</a></div>`);
+  }
+  const pr = !editing && (prospectParam || fromQuote?.prospectId) ? db.prospects.find(x => x.id === (prospectParam || fromQuote.prospectId)) : null;
   const parent = !editing && parentParam ? getOrder(parentParam) : null;
   const o = editing ? clone(editing) : {
     id: uid(), orderNo: nextNo('order'), customerPoNo: '', customerId: getPartner(customerParam) ? customerParam : '', orderDate: today(), dueDate: '',
@@ -1601,7 +1618,14 @@ function viewOrderForm(id, customerParam, prospectParam, parentParam) {
   const excluded = orderDescendantIds(o);
   const parentChoices = db.orders.filter(x => !excluded.has(x.id))
     .sort((a, b) => String(b.orderDate).localeCompare(String(a.orderDate)) || String(b.orderNo).localeCompare(String(a.orderNo)));
-  if (pr) {
+  if (fromQuote) {
+    // 見積書から受注にする：お客様・件名・担当・税率・明細（単価）を引き継ぐ
+    Object.assign(o, {
+      customerId: fromQuote.partnerId, subject: fromQuote.subject || '', staff: fromQuote.staff || '', taxRate: fromQuote.taxRate ?? db.settings.taxRate,
+      dueDate: pr?.dueDate || '', answerDate: pr?.answerDate || '',
+      items: fromQuote.items.map(({ name, spec, qty, unit, price }) => ({ id: uid(), name, spec, qty, unit, price })),
+    });
+  } else if (pr) {
     // 見込み案件から受注にする：会社名が一致する取引先と、品名・色・数量・納期・担当を引き継ぐ
     const p = findProduct(pr.product);
     Object.assign(o, {
@@ -1639,7 +1663,8 @@ function viewOrderForm(id, customerParam, prospectParam, parentParam) {
         </div>
       </section>
       ${parent ? `<div class="banner">受注 ${tag(parent.orderNo, 'is-order')} への追加の注文として、新しい受注を登録します。明細には追加分だけを入力してください。</div>` : ''}
-      ${pr ?`<div class="banner">見込み案件（${esc(pr.date)}｜${esc(pr.company)}）から受注を登録します。${o.customerId ? '' : '<b>お客様を選択（または「＋ 新規」で登録）してください。</b>'}</div>` : ''}
+      ${fromQuote ? `<div class="banner">見積書 ${tag(fromQuote.quoteNo, 'is-quote')} の内容（お客様・件名・明細・単価）を引き継いで受注を登録します。お客様の発注No.・納期を入力してください。</div>` : ''}
+      ${pr && !fromQuote ? `<div class="banner">見込み案件（${esc(pr.date)}｜${esc(pr.company)}）から受注を登録します。${o.customerId ? '' : '<b>お客様を選択（または「＋ 新規」で登録）してください。</b>'}</div>` : ''}
       <section class="card">
         <h2>受注内容</h2>
         <div class="grid-4">
@@ -1711,6 +1736,11 @@ function viewOrderForm(id, customerParam, prospectParam, parentParam) {
       return toast('保存をやめました（請求書の状況を元に戻すか、確認してからもう一度保存してください）', 'error');
     }
     linkPartnerKind(o.customerId, 'customer');
+    if (fromQuote) {
+      o.quoteId = fromQuote.id;
+      Object.assign(fromQuote, { orderId: o.id, wonAt: nowIso() });
+      delete fromQuote.outcome; delete fromQuote.lostReason; delete fromQuote.lostAt;
+    }
     if (editing) db.orders[db.orders.indexOf(editing)] = o;
     else db.orders.push({ ...o, createdAt: o.updatedAt });
     if (pr) pr.orderId = o.id;
@@ -1766,6 +1796,7 @@ function viewOrderDetail(id) {
         <div><dt>請求書</dt><dd><select data-act="billing" style="width:auto">${Object.keys(BILLING).map(b => `<option ${b === (o.billing || '未処理') ? 'selected' : ''}>${b}</option>`).join('')}</select></dd></div>
         <div class="span-2"><dt>お客様</dt><dd>${partnerLink(o.customerId)} ${cu?.contact ? `<span class="muted">／${esc(cu.contact)}</span>` : ''}</dd></div>
         <div class="span-2"><dt>件名</dt><dd>${esc(o.subject) || '—'}</dd></div>
+        ${o.quoteId ? `<div class="span-2"><dt>見積書</dt><dd>${getQuote(o.quoteId) ? quoteTag(getQuote(o.quoteId)) : '<span class="muted">（削除済み）</span>'}</dd></div>` : ''}
         ${o.parentOrderId ? `<div class="span-2"><dt>元の受注</dt><dd>${parent ? `<a href="#/orders/${parent.id}">${tag(parent.orderNo, 'is-order')}</a>` : '<span class="muted">（削除済み）</span>'}</dd></div>` : ''}
         ${children.length ? `<div class="span-2"><dt>追加の受注</dt><dd>${children.map(x => `<a href="#/orders/${x.id}">${tag(x.orderNo, 'is-order')}</a>`).join(' ')}</dd></div>` : ''}
       </dl>
@@ -1793,6 +1824,8 @@ function viewOrderDetail(id) {
     db.orders = db.orders.filter(x => x.id !== o.id);
     db.orders.forEach(x => { if (x.parentOrderId === o.id) delete x.parentOrderId; });
     db.prospects.forEach(p => { if (p.orderId === o.id) p.orderId = ''; });
+    // 見積書は「提出済」に戻す（受注を登録し直せる）
+    db.quotes.forEach(q => { if (q.orderId === o.id) { delete q.orderId; delete q.wonAt; } });
     save();
     toast('受注を削除しました');
     go('#/orders');
@@ -1804,9 +1837,10 @@ const DOC = {
   po: { label: '発注書', path: 'pos', noField: 'poNo', dateField: 'poDate', cls: 'is-po', step: '②', list: () => db.pos },
   dn: { label: '納品書', path: 'deliveries', noField: 'dnNo', dateField: 'deliveryDate', cls: 'is-dn', step: '③', list: () => db.deliveries },
   bill: { label: '請求書', path: 'bills', noField: 'billNo', dateField: 'invoiceDate', cls: 'is-inv', step: '④', list: () => db.bills },
+  quote: { label: '見積書', path: 'quotes', noField: 'quoteNo', dateField: 'quoteDate', cls: 'is-quote', step: '', list: () => db.quotes },
 };
-const DOC_TITLE = { po: '発注書', dn: '納品書', inv: '請求書', bill: '請求書', rc: '領収書' };
-const getDoc = (type, id) => ({ po: getPo, dn: getDn, bill: getBill }[type](id));
+const DOC_TITLE = { po: '発注書', dn: '納品書', inv: '請求書', bill: '請求書', rc: '領収書', quote: '見積書' };
+const getDoc = (type, id) => ({ po: getPo, dn: getDn, bill: getBill, quote: getQuote }[type](id));
 const nowIso = () => new Date().toISOString();
 function fmtDateTime(iso) {
   if (!iso) return '';
@@ -1841,10 +1875,18 @@ function buildModel(type, d) {
   const t = calc(d);
   const PENDING = '（発行時に採番）';
   const m = {
-    type, title: DOC_TITLE[type], to: partnerSnap(type === 'po' ? d.supplierId : o?.customerId), company: companySnap(),
+    type, title: DOC_TITLE[type], to: partnerSnap(type === 'po' ? d.supplierId : type === 'quote' ? d.partnerId : o?.customerId), company: companySnap(),
     items: d.items.map(({ name, spec, qty, unit, price }) => ({ name, spec, qty, unit, price })),
     sum: { sub: t.sub, tax: t.tax, total: t.total, rate: t.rate }, subject: d.subject || '', note: d.note || '', cond: [], reissue: null,
   };
+  if (type === 'quote') {
+    // 見積書：改訂は「再」の印ではなく、番号の枝番と版で示す
+    m.no = d.quoteNo;
+    m.meta = [['見積書No.', d.quoteNo || PENDING], ['見積日', fmtDate(d.quoteDate)], ['有効期限', fmtDate(d.validUntil)]];
+    if (d.reissueOf) m.meta.push(['改訂', `第${d.version || 2}版`]);
+    m.cond = [['納期', d.deliveryTerm || ''], ['支払条件', d.paymentTerms || ''], ['有効期限', fmtDate(d.validUntil)]];
+    return m;
+  }
   if (type === 'po') {
     m.no = d.poNo;
     m.meta = [['発注No.', d.poNo || PENDING], ['発注日', fmtDate(d.poDate)], ['納期', fmtDate(d.dueDate)], ['当社受注No.', o?.orderNo]];
@@ -1918,8 +1960,8 @@ function docBody(m) {
       <td class="r">${num(it.qty)}</td><td class="c">${esc(it.unit)}</td>
       <td class="r">${it.price === '' ? '' : num(it.price)}</td><td class="r">${num(lineAmount(it))}</td></tr>`);
   for (let i = rows.length; i < MIN_ROWS; i++) rows.push('<tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>');
-  const lead = { po: '下記の通り発注いたします。', dn: '下記の通り納品いたしました。ご査収ください。' }[m.type];
-  const totalLabel = { po: 'ご発注金額', dn: '合計金額' }[m.type];
+  const lead = { po: '下記の通り発注いたします。', dn: '下記の通り納品いたしました。ご査収ください。', quote: '下記の通りお見積り申し上げます。' }[m.type];
+  const totalLabel = { po: 'ご発注金額', dn: '合計金額', quote: 'お見積金額' }[m.type];
   return `
     <h1 class="doc-title">${m.title}</h1>
     <div class="doc-head">
@@ -1998,14 +2040,24 @@ function issueDoc(type, d) {
   const T = DOC[type];
   if (type === 'bill' && billIssueError(d)) return toast(billIssueError(d), 'error');
   if (type === 'dn' && !d.deliveryDate) return toast('納品日を入力してから発行してください', 'error');
-  if (!confirm(`この${T.label}を発行します。\n発行すると番号が付いて内容が確定し、編集・削除はできなくなります（誤りがあった場合は「取消」して再発行します）。\nよろしいですか？`)) return;
-  Object.assign(d, { [T.noField]: nextNo(type), status: 'issued', issuedAt: nowIso(), issuedBy: currentUser, version: d.version || 1 });
+  if (type === 'quote' && quoteIssueError(d)) return toast(quoteIssueError(d), 'error');
+  const old = d.reissueOf ? getDoc(type, d.reissueOf) : null;
+  const revising = type === 'quote' && old && stateOf(old) === 'issued';
+  if (!confirm(revising
+    ? `この見積書を第${d.version}版として発行します。\n前の版（${old.quoteNo}）は「取消」になり、記録として残ります。\nよろしいですか？`
+    : `この${T.label}を発行します。\n発行すると番号が付いて内容が確定し、編集・削除はできなくなります（誤りがあった場合は「取消」して再発行します）。\nよろしいですか？`)) return;
+  // 見積書の改訂版は、最初の版の番号に枝番を付ける（例：QT-2026-0001-2）
+  const no = type === 'quote' && old ? `${quoteBaseNo(old)}-${d.version}` : nextNo(type);
+  Object.assign(d, { [T.noField]: no, status: 'issued', issuedAt: nowIso(), issuedBy: currentUser, version: d.version || 1 });
   // 発行時の出荷実績の数を残す（サーバーで最新の販売実績と照合する）
   if (type === 'bill') d.reportQty = Object.fromEntries((d.reportIds || []).map(id => [id, toNum(db.salesReports.find(r => r.id === id)?.shipped)]));
   d.snap = buildModel(type, d);
-  const old = d.reissueOf ? getDoc(type, d.reissueOf) : null;
   if (old) old.replacedBy = d.id;
-  addLog(old ? '再発行' : '発行', type, d, { reason: old ? `再発行元：${old[T.noField]}` : '' });
+  if (revising) {
+    Object.assign(old, voidFields(`改訂（第${d.version}版 ${no} を発行）`));
+    addLog('取消', type, old, { reason: old.voidReason });
+  }
+  addLog(type === 'quote' && old ? '改訂' : old ? '再発行' : '発行', type, d, { reason: old ? `${type === 'quote' ? '前の版' : '再発行元'}：${old[T.noField]}` : '' });
   if (type === 'bill') syncOrderBilling(billOrderIds(d));
   save();
   toast(`${T.label} ${d[T.noField]} を発行しました`);
@@ -2035,7 +2087,9 @@ function reissueDoc(type, d) {
   const existing = T.list().find(x => x.reissueOf === d.id && isLive(x));
   if (existing) return go(`#/${T.path}/${existing.id}`);
   const copy = clone(d);
-  ['snap', 'issuedAt', 'issuedBy', 'voidAt', 'voidBy', 'voidReason', 'replacedBy', 'invoices', 'receipts'].forEach(k => delete copy[k]);
+  ['snap', 'issuedAt', 'issuedBy', 'voidAt', 'voidBy', 'voidReason', 'replacedBy', 'invoices', 'receipts',
+    'outcome', 'lostReason', 'lostAt', 'orderId'].forEach(k => { if (type === 'quote' || k !== 'orderId') delete copy[k]; });
+  if (type === 'quote') Object.assign(copy, { quoteDate: today(), validUntil: addDays(today(), toNum(db.settings.quoteValidDays) || 30) });
   Object.assign(copy, { id: uid(), [T.noField]: '', status: 'draft', reissueOf: d.id, version: (d.version || 1) + 1, createdAt: nowIso(), updatedAt: nowIso() });
   if (type === 'bill') {
     copy.dnIds = copy.dnIds.filter(id => stateOf(getDn(id) || {}) === 'issued' && !liveBillOfDn(id));
@@ -2065,7 +2119,7 @@ function migrateIssued() {
 // 発行後に取引先・自社情報が変わっていれば知らせる
 function changedNotice(type, d, m) {
   const o = d.orderId ? getOrder(d.orderId) : null;
-  const toNow = partnerSnap(type === 'po' ? d.supplierId : type === 'bill' ? d.partnerId : o?.customerId);
+  const toNow = partnerSnap(type === 'po' ? d.supplierId : type === 'bill' || type === 'quote' ? d.partnerId : o?.customerId);
   const diffs = [];
   if (JSON.stringify(toNow) !== JSON.stringify(m.to)) diffs.push('取引先（宛先）');
   if (JSON.stringify(companySnap()) !== JSON.stringify(m.company)) diffs.push('自社情報');
@@ -2134,10 +2188,13 @@ function stateBanner(type, d) {
   const next = d.replacedBy ? getDoc(type, d.replacedBy) : T.list().find(x => x.reissueOf === d.id && isLive(x));
   const lines = [];
   if (st === 'draft') lines.push(`<b>下書き</b>です。内容を確認して「発行する」を押してください。発行すると番号が付き、内容が確定します（以後は編集・削除できません）。`);
-  if (st === 'issued') lines.push(`<b>発行済</b>（${fmtDateTime(d.issuedAt)}${d.issuedBy ? '　' + esc(d.issuedBy) : ''}）。内容は確定しています。誤りがあった場合は「取消」してから再発行してください。`);
+  if (st === 'issued') lines.push(`<b>発行済</b>（${fmtDateTime(d.issuedAt)}${d.issuedBy ? '　' + esc(d.issuedBy) : ''}）。内容は確定しています。${type === 'quote'
+    ? '値引き・数量の変更などで出し直す場合は「改訂する」を押してください（番号に枝番が付き、この見積書は取消になります）。'
+    : '誤りがあった場合は「取消」してから再発行してください。'}`);
   if (st === 'void') lines.push(`<b>取消済</b>（${fmtDateTime(d.voidAt)}${d.voidBy ? '　' + esc(d.voidBy) : ''}）　理由：${esc(d.voidReason)}`);
-  if (origin) lines.push(`この${T.label}は <a href="#/${T.path}/${origin.id}">${esc(origin[T.noField])}</a>（取消済）の<b>再発行</b>です。書類に「再」の印が付きます。`);
-  if (next) lines.push(`再発行した${T.label}：<a href="#/${T.path}/${next.id}">${stateOf(next) === 'draft' ? '下書き' : esc(next[T.noField])}</a>`);
+  if (origin && type === 'quote') lines.push(`この見積書は <a href="#/quotes/${origin.id}">${esc(origin.quoteNo)}</a> の<b>改訂版</b>（第${d.version}版）です。${st === 'draft' ? '発行すると前の版は取消になります。' : ''}`);
+  else if (origin) lines.push(`この${T.label}は <a href="#/${T.path}/${origin.id}">${esc(origin[T.noField])}</a>（取消済）の<b>再発行</b>です。書類に「再」の印が付きます。`);
+  if (next) lines.push(`${type === 'quote' ? '改訂版' : `再発行した${T.label}`}：<a href="#/${T.path}/${next.id}">${stateOf(next) === 'draft' ? '下書き' : esc(next[T.noField])}</a>`);
   return `<div class="state-banner is-${st}">${lines.map(l => `<div>${l}</div>`).join('')}</div>`;
 }
 
@@ -3328,11 +3385,13 @@ function viewSearch(query) {
   }
   const orders = [...orderIds].map(getOrder).sort(byDateNoDesc('orderDate', 'orderNo'));
   const partners = q ? db.partners.filter(p => has(p.name, p.address, p.contact, p.tel)) : [];
+  const quotes = q ? db.quotes.filter(x => has(x.quoteNo, x.subject, partnerName(x.partnerId))).sort(byDateNoDesc('quoteDate', 'quoteNo')) : [];
 
   render(`
     <div class="page-head"><h1>検索結果：「${esc(query)}」</h1></div>
     ${!q ? '<div class="card empty">検索したい番号や会社名を入力してください。</div>' : ''}
-    ${q && !orders.length && !loosePos.length && !partners.length ? '<div class="card empty">該当するデータはありません。</div>' : ''}
+    ${q && !orders.length && !loosePos.length && !partners.length && !quotes.length ? '<div class="card empty">該当するデータはありません。</div>' : ''}
+    ${quotes.length ? `<section class="card"><h2>見積書</h2>${quoteTableHTML(quotes)}</section>` : ''}
     ${partners.length ? `<section class="card"><h2>取引先</h2><div class="actions">
       ${partners.map(p => `<a class="btn" href="#/partners/${p.id}">${esc(p.name)}</a>`).join('')}</div></section>` : ''}
     ${orders.map(o => `<section class="card search-result">
@@ -3375,8 +3434,8 @@ function viewPartners() {
   }));
   $$('[data-del]').forEach(b => b.addEventListener('click', () => {
     const p = getPartner(b.dataset.del);
-    if (usage(p) || db.bills.some(x => x.partnerId === p.id) || db.salesReports.some(x => x.partnerId === p.id)) {
-      return alert('この取引先は受注・発注書・請求書・販売実績表で使われているため削除できません。');
+    if (usage(p) || db.bills.some(x => x.partnerId === p.id) || db.salesReports.some(x => x.partnerId === p.id) || db.quotes.some(x => x.partnerId === p.id)) {
+      return alert('この取引先は受注・発注書・請求書・販売実績表・見積書で使われているため削除できません。');
     }
     if (!confirm(`${p.name} を削除します。よろしいですか？`)) return;
     db.partners = db.partners.filter(x => x.id !== p.id);
@@ -3411,6 +3470,7 @@ function viewPartnerDetail(id) {
           <span class="badge st-po">${KIND_LABEL[p.kind] || ''}</span></h1></div>
       <div class="actions">
         <a class="btn btn-primary" href="#/orders/new?customer=${p.id}">＋ この取引先の受注を登録</a>
+        <a class="btn" href="#/quotes/new?partner=${p.id}">＋ この取引先の見積書を作成</a>
         <a class="btn" href="#/pos/new?supplier=${p.id}">＋ この取引先へ発注書を作成</a>
         <button class="btn" data-act="edit">✎ 取引先情報を編集</button>
       </div>
@@ -3437,6 +3497,8 @@ function viewPartnerDetail(id) {
       <div class="tile"><div class="tile-label">納品書</div><div class="tile-value">${docs.dns.length} 件</div><div class="tile-sub">${sum(docs.dns)}（税込）</div></div>
       <div class="tile"><div class="tile-label">発注書（この取引先へ）</div><div class="tile-value">${docs.pos.length} 件</div><div class="tile-sub">${sum(docs.pos)}（税込）</div></div>
     </div>
+    ${(() => { const qs = db.quotes.filter(q => q.partnerId === p.id).sort(byDateNoDesc('quoteDate', 'quoteNo'));
+      return qs.length ? `<section class="card"><h2>見積書</h2>${quoteTableHTML(qs)}</section>` : ''; })()}
     <section class="card">
       <h2>受注（お客様として）</h2>
       ${docs.orders.length ? orderTableHTML(docs.orders) : `<div class="empty">この取引先の受注はまだありません。<br>
@@ -3813,7 +3875,8 @@ function viewProspects(editId) {
   const list = [...db.prospects].sort((a, b) => String(b.date).localeCompare(String(a.date)));
   render(`
     <div class="page-head"><h1>見込み案件</h1></div>
-    <p class="hint" style="margin:-8px 0 14px">まだ注文になっていない案件を記録します。注文が決まったら「受注にする」で受注登録の画面へ引き継げます。</p>
+    <p class="hint" style="margin:-8px 0 14px">まだ注文になっていない案件を記録します。「見積書を作る」で見積書へ、注文が決まったら「受注にする」で受注登録の画面へ引き継げます。</p>
+    ${expiredQuotesBanner()}
     <section class="card">
       <h2>${editing ? '見込み案件を編集' : '見込み案件を追加'}</h2>
       <form id="prospect-form" class="grid-4" autocomplete="off">
@@ -3837,14 +3900,17 @@ function viewProspects(editId) {
       ${list.length ? `
       <div class="filters"><input type="search" data-filter placeholder="会社名・色・担当で絞り込み"><span class="muted" data-count></span></div>
       <div class="table-wrap"><table class="list">
-        <thead><tr><th>受付日</th><th>会社名</th><th>品名</th><th>色</th><th class="num">数量</th><th>希望納期</th><th>回答納期</th><th>担当</th><th>備考</th><th></th></tr></thead>
+        <thead><tr><th>受付日</th><th>会社名</th><th>品名</th><th>色</th><th class="num">数量</th><th>希望納期</th><th>回答納期</th><th>担当</th><th>備考</th><th>見積書</th><th></th></tr></thead>
         <tbody>${list.map(x => {
           const o = x.orderId ? getOrder(x.orderId) : null;
-          return `<tr data-search="${esc([x.company, x.product, x.color, x.staff, x.note].join(' '))}">
+          const qs = quotesOfProspect(x.id).filter(isLive);
+          return `<tr data-search="${esc([x.company, x.product, x.color, x.staff, x.note, ...qs.map(q => q.quoteNo)].join(' '))}">
           <td class="nowrap">${esc(x.date)}</td><td class="wide">${esc(x.company)}</td><td>${esc(x.product)}</td><td>${esc(x.color)}</td>
           <td class="num">${num(x.qty)}</td><td class="nowrap">${esc(x.dueDate)}</td><td class="nowrap">${esc(x.answerDate)}</td><td>${esc(x.staff)}</td>
           <td class="wide">${esc(x.note)}</td>
+          <td>${qs.map(q => `<div class="nowrap">${quoteTag(q)} ${badge(quoteStatus(q))}</div>`).join('') || '<span class="muted">—</span>'}</td>
           <td><span class="actions">
+            ${o ? '' : `<a class="btn btn-sm" href="#/quotes/new?prospect=${x.id}">見積書を作る</a>`}
             ${o ? `<a href="#/orders/${o.id}">${tag(o.orderNo, 'is-order')}</a>` : `<a class="btn btn-sm btn-primary" href="#/orders/new?prospect=${x.id}">受注にする</a>`}
             <a class="btn btn-sm" href="#/prospects?edit=${x.id}">編集</a>
             <button class="btn btn-sm btn-danger" data-del-prospect="${x.id}">削除</button></span></td></tr>`;
@@ -3868,17 +3934,272 @@ function viewProspects(editId) {
   });
   $$('[data-del-prospect]').forEach(b => b.addEventListener('click', () => {
     const x = db.prospects.find(r => r.id === b.dataset.delProspect);
-    if (!confirm(`見込み案件（${x.company}）を削除しますか？`)) return;
+    if (!confirm(`見込み案件（${x.company}）を削除しますか？${quotesOfProspect(x.id).length ? '\n見積書は残り、見込み案件とのつながりが外れます。' : ''}`)) return;
     db.prospects = db.prospects.filter(r => r.id !== x.id);
+    // 下書きの見積書だけつながりを外す（発行済の見積書は変えず、画面では「なし」と表示する）
+    db.quotes.forEach(q => { if (q.prospectId === x.id && stateOf(q) === 'draft') q.prospectId = ''; });
     save();
     toast('見込み案件を削除しました');
     viewProspects();
   }));
 }
 
+// ---------- 見積書 ----------
+// 見積書の状況：下書き／提出済／期限切れ／受注／失注／取消
+const QUOTE_STATUS = {
+  draft: { label: '下書き', cls: 'st-new' }, sent: { label: '提出済', cls: 'st-po' }, expired: { label: '期限切れ', cls: 'st-partial' },
+  won: { label: '受注', cls: 'st-done' }, lost: { label: '失注', cls: 'st-ng' }, void: { label: '取消', cls: 'st-ng' },
+};
+function quoteStatus(q) {
+  const st = stateOf(q);
+  if (st !== 'issued') return QUOTE_STATUS[st];
+  if (q.orderId && getOrder(q.orderId)) return QUOTE_STATUS.won;
+  if (q.outcome === 'lost') return QUOTE_STATUS.lost;
+  if (q.validUntil && q.validUntil < today()) return QUOTE_STATUS.expired;
+  return QUOTE_STATUS.sent;
+}
+// 改訂版の番号の元になる、最初の版の番号（QT-2026-0001-2 → QT-2026-0001）
+function quoteBaseNo(q) {
+  let x = q;
+  for (let i = 0; x.reissueOf && i < 50; i++) x = getQuote(x.reissueOf) || x;
+  return x.quoteNo;
+}
+function quoteIssueError(q) {
+  if (!getPartner(q.partnerId)) return 'お客様（見積先）を選択してください';
+  if (!cleanItems(q.items).length) return '明細を1行以上入力してください';
+  if (q.items.some(noPriceLine)) return '単価が入っていない明細があります。単価を入れてから発行してください';
+  if (!q.quoteDate) return '見積日を入力してください';
+  return '';
+}
+const quotesOfProspect = id => db.quotes.filter(q => q.prospectId === id).sort(byField('quoteNo'));
+const quoteTag = q => `<a href="#/quotes/${q.id}">${docTag('quote', q)}</a>`;
+// 提出済のまま有効期限を過ぎた見積書（受注・失注を記録してもらう）
+const expiredQuotes = () => db.quotes.filter(q => quoteStatus(q) === QUOTE_STATUS.expired);
+const expiredQuotesBanner = () => {
+  const n = expiredQuotes().length;
+  return n ? `<div class="banner">有効期限を過ぎた見積書が ${n} 件あります。お客様に確認し、「受注にする」か「失注にする」を記録してください。
+    <a href="#/quotes?filter=expired">期限切れの見積書を表示</a></div>` : '';
+};
+
+function quoteTableHTML(list) {
+  return `<div class="table-wrap"><table class="list">
+    <thead><tr><th>見積書No.</th><th>見積日</th><th>お客様</th><th>件名</th><th>有効期限</th><th class="num">金額（税込）</th><th>状況</th><th>受注</th><th></th></tr></thead>
+    <tbody>${list.map(q => {
+      const qs = quoteStatus(q);
+      const o = q.orderId ? getOrder(q.orderId) : null;
+      const search = [q.quoteNo, partnerName(q.partnerId), q.subject, qs.label].join(' ');
+      return `<tr class="clickable${isLive(q) ? '' : ' is-void-row'}" data-href="#/quotes/${q.id}" data-search="${esc(search)}" ${isLive(q) ? '' : 'data-void="1"'}>
+        <td class="nowrap">${docTag('quote', q)}</td><td class="nowrap">${esc(q.quoteDate)}</td><td class="wide">${partnerLink(q.partnerId)}</td>
+        <td>${esc(q.subject)}</td><td class="nowrap">${esc(q.validUntil) || '—'}</td><td class="num">${yen(calc(q).total)}</td>
+        <td>${badge(qs)}</td><td>${o ? `<a href="#/orders/${o.id}">${tag(o.orderNo, 'is-order')}</a>` : '<span class="muted">—</span>'}</td>
+        <td><a class="btn btn-sm" href="#/quotes/${q.id}">表示・印刷</a></td></tr>`;
+    }).join('')}</tbody></table></div>`;
+}
+
+function viewQuoteList(q) {
+  const filter = q?.get('filter') || '';
+  const all = [...db.quotes].sort(byDateNoDesc('quoteDate', 'quoteNo'));
+  const list = filter === 'expired' ? expiredQuotes().sort(byDateNoDesc('quoteDate', 'quoteNo')) : all;
+  const voids = list.filter(x => !isLive(x)).length;
+  render(`
+    <div class="page-head">
+      <div><h1>見積書${filter === 'expired' ? '（有効期限切れ）' : ''}</h1></div>
+      <div class="actions"><a class="btn btn-primary" href="#/quotes/new">＋ 見積書を作成</a></div>
+    </div>
+    <p class="hint no-print" style="margin:-8px 0 14px">見込み案件の画面の「見積書を作る」から作ると、会社・品名・数量が入ります。注文が決まったら見積書の画面で「受注にする」を押すと、明細と単価を引き継いだ受注を登録できます。</p>
+    ${filter === 'expired' ? '<p><a href="#/quotes">すべての見積書を表示</a></p>' : expiredQuotesBanner()}
+    <section class="card">
+      ${list.length ? `
+      <div class="filters"><input type="search" data-filter placeholder="番号・会社名・件名・状況で絞り込み">
+        ${voids ? `<label class="check"><input type="checkbox" data-show-void> 取消した見積書も表示（${voids} 件）</label>` : ''}
+        <span class="muted" data-count></span></div>
+      ${quoteTableHTML(list)}` : `<div class="empty">見積書はまだありません。<br><a class="btn btn-primary" href="#/quotes/new">＋ 見積書を作成</a></div>`}
+    </section>`);
+  bindListFilter($('#view'));
+}
+
+function prospectOptions(selected) {
+  const list = [...db.prospects].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  return '<option value="">— 紐付けなし —</option>' + list.map(x =>
+    `<option value="${x.id}" ${x.id === selected ? 'selected' : ''}>${esc(x.date)}｜${esc(x.company)}｜${esc(x.product)}${x.color ? `（${esc(x.color)}）` : ''}×${num(x.qty)}</option>`).join('');
+}
+
+function viewQuoteForm(id, prospectParam, partnerParam) {
+  const editing = id ? getQuote(id) : null;
+  if (id && !editing) return notFound();
+  if (editing && stateOf(editing) !== 'draft') return lockedNotice('quote', editing);
+  const pr = !editing && prospectParam ? db.prospects.find(x => x.id === prospectParam) : null;
+  const q = editing ? clone(editing) : {
+    id: uid(), quoteNo: '', status: 'draft', partnerId: getPartner(partnerParam) ? partnerParam : '', prospectId: '', quoteDate: today(),
+    validUntil: addDays(today(), toNum(db.settings.quoteValidDays) || 30), deliveryTerm: '', paymentTerms: db.settings.paymentTerms || '',
+    staff: '', subject: '', taxRate: db.settings.taxRate, items: [blankItem(true, n => priceFor(partnerParam, n))], note: db.settings.quoteNote || '',
+  };
+  if (pr) {
+    // 見込み案件から作る：会社名が一致する取引先と、品名・色・数量・担当を引き継ぐ
+    const pid = db.partners.find(x => x.name === pr.company)?.id || '';
+    const p = findProduct(pr.product);
+    Object.assign(q, {
+      prospectId: pr.id, partnerId: pid, staff: pr.staff || '',
+      items: [{ id: uid(), name: pr.product, spec: pr.color || '', qty: toNum(pr.qty), unit: p?.unit || '個', price: priceFor(pid, pr.product) }],
+    });
+  }
+
+  render(`
+    <div class="page-head">
+      <div><div class="crumb"><a href="#/quotes">見積書</a> › ${editing ? '編集' : '作成'}</div>
+        <h1>${editing ? `見積書を編集 ${docTag('quote', q)}` : '見積書を作成'}</h1></div>
+    </div>
+    ${pr ? `<div class="banner">見込み案件（${esc(pr.date)}｜${esc(pr.company)}）から見積書を作ります。${q.partnerId ? '' : '<b>お客様を選択（または「＋ 新規」で登録）してください。</b>見積書の宛名に印字されます。'}</div>` : ''}
+    <form id="doc-form" autocomplete="off">
+      <section class="card">
+        <h2>番号と紐付け</h2>
+        <div class="grid-2">
+          <div class="field number-field is-quote">
+            <label>見積書No.</label>
+            <div class="number-pending">${q.quoteNo ? esc(q.quoteNo) : '発行時に自動で付きます'}</div>
+            <p class="hint">保存すると「下書き」になります。内容を確認して「発行する」を押すと番号が付き、内容が確定します。</p>
+          </div>
+          <div class="field">
+            <label>紐付ける見込み案件</label>
+            <select name="prospectId">${prospectOptions(q.prospectId)}</select>
+          </div>
+        </div>
+      </section>
+      <section class="card">
+        <h2>見積内容</h2>
+        <div class="grid-4">
+          <div class="span-2">${partnerSelectField('partnerId', 'お客様（見積先）', 'customer', q.partnerId)}</div>
+          <div class="field"><label>見積日</label><input type="date" name="quoteDate" value="${esc(q.quoteDate)}"></div>
+          <div class="field"><label>有効期限</label><input type="date" name="validUntil" value="${esc(q.validUntil)}"></div>
+          <div class="field span-2"><label>件名 <span class="opt">（案件名）</span></label><input name="subject" value="${esc(q.subject)}" placeholder="例：社用車配備用 防災用品"></div>
+          <div class="field"><label>担当者</label><select name="staff">${staffOptions(q.staff)}</select></div>
+          <div class="field"><label>消費税率（%）</label><input type="number" name="taxRate" value="${esc(q.taxRate)}" min="0" step="any" class="num"></div>
+          <div class="field span-2"><label>納期</label><input name="deliveryTerm" value="${esc(q.deliveryTerm)}" placeholder="例：ご注文後 2 週間／9月下旬予定"></div>
+          <div class="field span-2"><label>支払条件</label><input name="paymentTerms" value="${esc(q.paymentTerms)}" placeholder="例：月末締め翌月末現金振込"></div>
+        </div>
+        <p class="hint">有効期限の初期値は、見積日から ${esc(db.settings.quoteValidDays || 30)} 日後です（設定画面で変えられます）。</p>
+      </section>
+      <section class="card">
+        <h2>明細（お客様への見積単価）</h2>
+        <div id="items"></div>
+      </section>
+      <section class="card">
+        <div class="field"><label>備考 <span class="opt">（見積書に印字されます）</span></label><textarea name="note">${esc(q.note)}</textarea></div>
+      </section>
+      <div class="form-actions">
+        <a class="btn" href="${editing ? `#/quotes/${q.id}` : pr ? '#/prospects' : '#/quotes'}">キャンセル</a>
+        <button class="btn btn-primary" type="submit">下書きを保存して確認へ</button>
+      </div>
+    </form>`);
+
+  const form = $('#doc-form');
+  const ed = mountItems($('#items'), q.items, { getRate: () => form.elements.taxRate.value, autoPrice: true,
+    priceOf: n => priceFor(form.elements.partnerId.value, n) });
+  form.elements.taxRate.addEventListener('input', ed.updateTotals);
+  bindPartnerButtons(form);
+
+  form.addEventListener('submit', e => {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(form));
+    if (!f.partnerId) return toast('お客様（見積先）を選択してください', 'error');
+    const items = cleanItems(ed.items);
+    if (!items.length) return toast('明細を1行以上入力してください（品名は必須です）', 'error');
+    if (itemsError(items)) return toast(itemsError(items), 'error');
+    if (f.validUntil && f.quoteDate && f.validUntil < f.quoteDate) return toast('有効期限は見積日より後の日付にしてください', 'error');
+    Object.assign(q, {
+      partnerId: f.partnerId, prospectId: db.prospects.some(x => x.id === f.prospectId) ? f.prospectId : '', quoteDate: f.quoteDate, validUntil: f.validUntil,
+      subject: f.subject.trim(), staff: f.staff, taxRate: toNum(f.taxRate), deliveryTerm: f.deliveryTerm.trim(), paymentTerms: f.paymentTerms.trim(),
+      items, note: f.note, updatedAt: nowIso(),
+    });
+    linkPartnerKind(q.partnerId, 'customer');
+    if (editing) db.quotes[db.quotes.indexOf(editing)] = q;
+    else db.quotes.push({ ...q, createdAt: q.updatedAt });
+    save();
+    toast('見積書を下書きとして保存しました。内容を確認して「発行する」を押してください');
+    go(`#/quotes/${q.id}`);
+  });
+}
+
+function viewQuoteDetail(id) {
+  const q = getQuote(id);
+  if (!q) return notFound();
+  const st = stateOf(q);
+  const qs = quoteStatus(q);
+  const m = docModel('quote', q);
+  const o = q.orderId ? getOrder(q.orderId) : null;
+  const pr = q.prospectId ? db.prospects.find(x => x.id === q.prospectId) : null;
+  const hasNext = q.replacedBy || db.quotes.some(x => x.reissueOf === q.id && isLive(x));
+  const actions = {
+    draft: `<button class="btn btn-primary" data-act="issue">✔ 発行する</button>
+      <a class="btn" href="#/quotes/${q.id}/edit">✎ 編集</a>
+      <button class="btn btn-print" data-act="print">🖨 下書きを印刷</button>
+      <button class="btn btn-danger" data-act="delete">下書きを削除</button>`,
+    issued: `<button class="btn btn-print" data-act="print">🖨 PDFで印刷・保存</button>
+      ${o ? '' : `<a class="btn btn-primary" href="#/orders/new?quote=${q.id}">→ 受注にする</a>
+        ${q.outcome === 'lost' ? '<button class="btn" data-act="reopen">提出済に戻す</button>' : '<button class="btn" data-act="lost">失注にする</button>'}
+        ${hasNext ? '' : '<button class="btn" data-act="revise">✎ 改訂する（出し直す）</button>'}`}
+      <button class="btn btn-danger" data-act="void">取消</button>`,
+    void: `<button class="btn btn-print" data-act="print">🖨 印刷（取消済）</button>
+      ${hasNext ? '' : '<button class="btn btn-primary" data-act="reissue">↻ 再発行する</button>'}`,
+  }[st];
+
+  render(`
+    <div class="page-head no-print">
+      <div><div class="crumb"><a href="#/quotes">見積書</a> › 表示・印刷</div>
+        <h1>見積書 ${docTag('quote', q)} ${st === 'void' ? '' : badge(qs)}</h1></div>
+      <div class="actions">${actions}</div>
+    </div>
+    <section class="card no-print">
+      ${stateBanner('quote', q)}
+      ${st === 'draft' ? '' : changedNotice('quote', q, m)}
+      ${qs === QUOTE_STATUS.expired ? '<div class="banner">有効期限を過ぎています。お客様に確認し、「受注にする」か「失注にする」を記録してください。条件を変えて出し直す場合は「改訂する」を押します。</div>' : ''}
+      ${q.outcome === 'lost' && st === 'issued' ? `<div class="banner">失注（${fmtDateTime(q.lostAt)}）${q.lostReason ? `　理由：${esc(q.lostReason)}` : ''}</div>` : ''}
+      <h2 style="margin-top:14px">紐付け</h2>
+      <div class="link-info">
+        <span>見込み案件：<b>${pr ? `<a href="#/prospects">${esc(pr.date)}｜${esc(pr.company)}</a>` : '<span class="muted">なし</span>'}</b></span>
+        <span>お客様：<b>${partnerLink(q.partnerId)}</b></span>
+        <span>受注：<b>${o ? `<a href="#/orders/${o.id}">${tag(o.orderNo, 'is-order')}</a>` : '<span class="muted">まだありません</span>'}</b></span>
+      </div>
+      ${o ? chainHTML(o, { withAdd: false }) : ''}
+      <p class="hint">「PDFで印刷・保存」→ 印刷画面の送信先（プリンター）で <b>「PDFに保存」</b> を選ぶと PDF ファイルになります。</p>
+    </section>
+    <div class="paper-scroll"><div class="paper">${renderDoc(m, st)}</div></div>
+    ${logsHTML(q.id)}`);
+
+  $('[data-act=print]').addEventListener('click', () => printDoc(`見積書_${q.quoteNo || '下書き'}`));
+  $('[data-act=issue]')?.addEventListener('click', () => issueDoc('quote', q));
+  $('[data-act=void]')?.addEventListener('click', () => voidDoc('quote', q));
+  $('[data-act=reissue]')?.addEventListener('click', () => reissueDoc('quote', q));
+  $('[data-act=revise]')?.addEventListener('click', () => {
+    if (!confirm(`この見積書を改訂します（値引き・数量の変更などで出し直す）。\n内容を引き継いだ第${(q.version || 1) + 1}版の下書きを作ります。改訂版を発行すると、この見積書は「取消」になります。\nよろしいですか？`)) return;
+    reissueDoc('quote', q);
+  });
+  $('[data-act=lost]')?.addEventListener('click', () => {
+    const r = prompt('失注にします。理由を入力してください（任意。例：価格、納期、他社に決定）');
+    if (r == null) return;
+    Object.assign(q, { outcome: 'lost', lostReason: r.trim(), lostAt: nowIso() });
+    save();
+    toast('失注として記録しました');
+    route();
+  });
+  $('[data-act=reopen]')?.addEventListener('click', () => {
+    delete q.outcome; delete q.lostReason; delete q.lostAt;
+    save();
+    toast('提出済に戻しました');
+    route();
+  });
+  $('[data-act=delete]')?.addEventListener('click', () => {
+    if (!confirm('この見積書の下書きを削除します。よろしいですか？')) return;
+    db.quotes = db.quotes.filter(x => x.id !== q.id);
+    save();
+    toast('見積書の下書きを削除しました');
+    go('#/quotes');
+  });
+}
+
 // ---------- 商品・色マスタ ----------
 function viewMasters() {
-  const allItems = () => [...db.orders, ...db.pos, ...db.deliveries].flatMap(d => d.items);
+  const allItems = () => [...db.orders, ...db.pos, ...db.deliveries, ...db.quotes].flatMap(d => d.items);
   const usedName = name => allItems().some(it => it.name === name);
   const usedColor = c => allItems().some(it => it.spec === c);
   render(`
@@ -4042,10 +4363,21 @@ function viewSettings() {
           <div class="field"><label>標準の消費税率（%）</label><input type="number" name="taxRate" value="${esc(s.taxRate)}" min="0" step="any" class="num"></div>
           <div class="field"><label>請求書No.の頭文字</label><input name="p_inv" value="${esc(s.prefix.inv)}"></div>
           <div class="field"><label>領収書No.の頭文字</label><input name="p_rc" value="${esc(s.prefix.rc)}"></div>
-          <div class="field span-2"><label>発注書の標準の支払条件</label><input name="paymentTerms" value="${esc(s.paymentTerms)}"></div>
+          <div class="field span-2"><label>発注書・見積書の標準の支払条件</label><input name="paymentTerms" value="${esc(s.paymentTerms)}"></div>
+          <div class="field"><label>見積書No.の頭文字</label><input name="p_quote" value="${esc(s.prefix.quote)}"></div>
         </div>
         <p class="hint">番号は「頭文字-西暦-連番」の形で自動採番されます（例：${esc(s.prefix.order)}-${new Date().getFullYear()}-0001）。
-          請求書は請求書だけの連番、領収書は請求書の番号の頭文字を変えたものになります（例：${esc(s.prefix.inv)}-${new Date().getFullYear()}-0001 → ${esc(s.prefix.rc)}-${new Date().getFullYear()}-0001）。</p>
+          請求書は請求書だけの連番、領収書は請求書の番号の頭文字を変えたものになります（例：${esc(s.prefix.inv)}-${new Date().getFullYear()}-0001 → ${esc(s.prefix.rc)}-${new Date().getFullYear()}-0001）。
+          見積書を改訂すると、最初の版の番号に枝番が付きます（例：${esc(s.prefix.quote)}-${new Date().getFullYear()}-0001-2）。</p>
+      </section>
+      <section class="card">
+        <h2>見積書</h2>
+        <div class="grid-2">
+          <div class="field"><label>有効期限 <span class="opt">（見積日から何日後か）</span></label>
+            <input type="number" name="quoteValidDays" value="${esc(s.quoteValidDays)}" min="1" step="1" class="num" style="max-width:120px"></div>
+          <div class="field"><label>見積書の備考（初期値）</label><textarea name="quoteNote">${esc(s.quoteNote)}</textarea>
+            <p class="hint">見積書を作るときに備考欄に入ります。書類ごとに変えられます。</p></div>
+        </div>
       </section>
       <section class="card">
         <h2>請求書・領収書・納期の警告</h2>
@@ -4082,12 +4414,15 @@ function viewSettings() {
   $('#settings-form').addEventListener('submit', e => {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target));
-    const prefixes = [f.p_order, f.p_po, f.p_dn, f.p_inv, f.p_rc].map(v => v.trim());
+    const prefixes = [f.p_order, f.p_po, f.p_dn, f.p_inv, f.p_rc, f.p_quote].map(v => v.trim());
     if (prefixes.some(v => !/^[A-Za-z0-9]+$/.test(v))) return toast('番号の頭文字は半角英数字で入力してください', 'error');
+    if (!(toNum(f.quoteValidDays) >= 1)) return toast('見積書の有効期限は 1 日以上にしてください', 'error');
     s.company = { name: f.name, dept: f.dept, zip: f.zip, address: f.address, tel: f.tel, fax: f.fax, email: f.email, invoiceNo: f.invoiceNo, person: f.person };
     s.showLogo = f.showLogo === 'on';
     s.paymentTerms = f.paymentTerms.trim();
-    s.prefix = { order: prefixes[0], po: prefixes[1], dn: prefixes[2], inv: prefixes[3], rc: prefixes[4] };
+    s.prefix = { order: prefixes[0], po: prefixes[1], dn: prefixes[2], inv: prefixes[3], rc: prefixes[4], quote: prefixes[5] };
+    s.quoteValidDays = Math.round(toNum(f.quoteValidDays));
+    s.quoteNote = f.quoteNote.trim();
     s.taxRate = toNum(f.taxRate);
     s.bankAccount = f.bankAccount.trim();
     s.invoiceNote = f.invoiceNote.trim();
