@@ -6,16 +6,19 @@
 const SHEETS = {
   config: '設定', partners: '取引先', products: '商品', orders: '受注', pos: '発注書',
   deliveries: '納品書', receipts: '入庫', prospects: '見込み案件', logs: '操作履歴', bills: '請求書', salesReports: '販売実績',
+  quotes: '見積書',
 };
 const HEADER = ['id', '内容', '更新日時', '更新者', 'rev', 'data'];
 const COL = { id: 0, label: 1, at: 2, by: 3, rev: 4, data: 5 };
 // 同じ番号が重複してはいけない項目
-const UNIQUE = { orders: ['orderNo', '自社受注No.'], pos: ['poNo', '発注No.'], deliveries: ['dnNo', '納品書No.'], bills: ['billNo', '請求書No.'] };
+const UNIQUE = { orders: ['orderNo', '自社受注No.'], pos: ['poNo', '発注No.'], deliveries: ['dnNo', '納品書No.'], bills: ['billNo', '請求書No.'], quotes: ['quoteNo', '見積書No.'] };
 // 発行済・取消済の書類で変更してはいけない項目
 const LOCKED = {
   pos: ['poNo', 'orderId', 'supplierId', 'items', 'snap', 'issuedAt', 'issuedBy', 'reissueOf'],
   deliveries: ['dnNo', 'orderId', 'deliveryDate', 'items', 'shipType', 'snap', 'issuedAt', 'issuedBy', 'reissueOf'],
   bills: ['billNo', 'partnerId', 'dnIds', 'reportIds', 'invoiceDate', 'payDue', 'subject', 'note', 'shipping', 'snap', 'issuedAt', 'issuedBy', 'reissueOf'],
+  // 見積書は、受注・失注の記録（orderId・outcome など）だけを発行後も変更できる
+  quotes: ['quoteNo', 'partnerId', 'quoteDate', 'validUntil', 'subject', 'deliveryTerm', 'paymentTerms', 'taxRate', 'items', 'note', 'snap', 'issuedAt', 'issuedBy', 'reissueOf'],
 };
 const MIGRATED_BY = '（以前のデータから移行）'; // js/app.js と同じ
 const VOID_FIELDS = ['status', 'voidAt', 'voidBy', 'voidReason'];

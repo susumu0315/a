@@ -12,11 +12,14 @@
   レスキューミーホルダー 350 円。単価がわからない商品（しのげーる など）は空欄のまま。
 - 「能美防災㈱YAC六甲」のように拠点名が付いた会社は、取引先「能美防災株式会社」にまとめ、拠点名を受注の件名にする
   （実際の請求書は能美防災株式会社あてで、拠点名を件名に書いているため）。
+- 「ボウエキ（有馬様）」のようにかっこ書きの付いた会社は、取引先「株式会社ボウエキ」にまとめ、かっこの中を受注の件名にする
+  （ボウエキ様あての請求書は、どれも株式会社ボウエキ御中のため）。
 """
 import collections
 import datetime
 import json
 import random
+import re
 import string
 import sys
 
@@ -26,6 +29,8 @@ PRODUCT_NAMES = {'ＲＱＭ': 'レスキューミー', 'ＲＱＭホルダー': 
 PRICES = {'レスキューミー': 1250, 'レスキューミーホルダー': 350}
 PARTNER_PRICES = {'相日防災株式会社': {'レスキューミー': 1200}}
 NOHMI = '能美防災株式会社'
+# かっこ書き付きの会社名で、「株式会社」が省かれているもの（請求書は正式な会社名あて）
+COMPANY_ALIASES = {'ボウエキ': '株式会社ボウエキ'}
 DEFAULT_PARTNERS = ['株式会社ボウエキ', '株式会社ジーエム', '相日防災株式会社', '株式会社三和製作所',
                     '株式会社ライズ', '久下小学校', 'くらし企画', 'SIAソリューション']
 
@@ -43,9 +48,14 @@ def partner_name(v):
 
 
 def split_branch(name):
-    """「能美防災株式会社YAC六甲」→（能美防災株式会社, YAC六甲）"""
+    """「能美防災株式会社YAC六甲」→（能美防災株式会社, YAC六甲）
+    「ボウエキ（有馬様）」→（株式会社ボウエキ, 有馬様）：かっこ書きの担当者は件名にし、取引先は会社にまとめる"""
     if name.startswith(NOHMI) and len(name) > len(NOHMI):
         return NOHMI, name[len(NOHMI):].strip()
+    m = re.fullmatch(r'(.+?)[（(](.+)[）)]', name)
+    if m:
+        company = m.group(1).strip()
+        return COMPANY_ALIASES.get(company, company), m.group(2).strip()
     return name, ''
 
 
