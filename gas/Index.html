@@ -1123,7 +1123,7 @@ function remainingItems(order, excludeDnId) {
 const routes = [
   [/^\/$/, viewDashboard],
   [/^\/orders$/, (m, q) => viewOrderList(q)],
-  [/^\/orders\/new$/, (m, q) => viewOrderForm(null, q.get('customer'), q.get('prospect'))],
+  [/^\/orders\/new$/, (m, q) => viewOrderForm(null, q.get('customer'), q.get('prospect'), q.get('parent'))],
   [/^\/orders\/([^/]+)\/edit$/, m => viewOrderForm(m[1])],
   [/^\/orders\/([^/]+)$/, m => viewOrderDetail(m[1])],
   [/^\/pos$/, () => viewDocList('po')],
@@ -1568,14 +1568,39 @@ function staffOptions(selected) {
   return '<option value="">— 選択 —</option>' + list.map(s => `<option ${s === selected ? 'selected' : ''}>${esc(s)}</option>`).join('');
 }
 
-function viewOrderForm(id, customerParam, prospectParam) {
+// 追加の受注のつながり（元の受注 parentOrderId）
+const parentOf = o => o?.parentOrderId ? getOrder(o.parentOrderId) : null;
+const childrenOf = o => db.orders.filter(x => x.parentOrderId === o.id);
+// o を元の受注に選べない受注（自分と、自分の追加の受注をたどった先）。つながりが輪にならないように
+function orderDescendantIds(o) {
+  const ids = new Set([o.id]);
+  for (let added = true; added;) {
+    added = false;
+    db.orders.forEach(x => { if (x.parentOrderId && ids.has(x.parentOrderId) && !ids.has(x.id)) { ids.add(x.id); added = true; } });
+  }
+  return ids;
+}
+
+function viewOrderForm(id, customerParam, prospectParam, parentParam) {
   const editing = id ? getOrder(id) : null;
   if (id && !editing) return notFound();
   const pr = !editing && prospectParam ? db.prospects.find(x => x.id === prospectParam) : null;
+  const parent = !editing && parentParam ? getOrder(parentParam) : null;
   const o = editing ? clone(editing) : {
     id: uid(), orderNo: nextNo('order'), customerPoNo: '', customerId: getPartner(customerParam) ? customerParam : '', orderDate: today(), dueDate: '',
     answerDate: '', staff: '', billing: '未処理', subject: '', taxRate: db.settings.taxRate, items: [blankItem(true, n => priceFor(customerParam, n))], note: '',
   };
+  if (parent) {
+    // 追加の受注：お客様・担当・税率・件名を元の受注から引き継ぐ（明細は空から）
+    Object.assign(o, {
+      parentOrderId: parent.id, customerId: parent.customerId, staff: parent.staff || '', taxRate: parent.taxRate ?? db.settings.taxRate,
+      subject: `${parent.orderNo} の追加分${parent.subject ? `（${parent.subject}）` : ''}`,
+      items: [blankItem(true, n => priceFor(parent.customerId, n))],
+    });
+  }
+  const excluded = orderDescendantIds(o);
+  const parentChoices = db.orders.filter(x => !excluded.has(x.id))
+    .sort((a, b) => String(b.orderDate).localeCompare(String(a.orderDate)) || String(b.orderNo).localeCompare(String(a.orderNo)));
   if (pr) {
     // 見込み案件から受注にする：会社名が一致する取引先と、品名・色・数量・納期・担当を引き継ぐ
     const p = findProduct(pr.product);
@@ -1605,9 +1630,16 @@ function viewOrderForm(id, customerParam, prospectParam) {
             <input name="customerPoNo" value="${esc(o.customerPoNo)}" placeholder="例：PO-12345">
             <p class="hint">納品書に「貴社発注No.」として印字されます。</p>
           </div>
+          <div class="field span-2">
+            <label>元の受注No. <span class="opt">（追加の注文のとき）</span></label>
+            <select name="parentOrderId"><option value="">— なし —</option>${parentChoices.map(x =>
+              `<option value="${x.id}" ${x.id === o.parentOrderId ? 'selected' : ''}>${esc(x.orderNo)}｜${esc(partnerName(x.customerId))}${x.subject ? `｜${esc(x.subject)}` : ''}</option>`).join('')}</select>
+            <p class="hint">すでにある受注への追加の注文は、新しい受注として登録し、ここで元の受注を選びます。受注の画面でお互いにたどれます。</p>
+          </div>
         </div>
       </section>
-      ${pr ? `<div class="banner">見込み案件（${esc(pr.date)}｜${esc(pr.company)}）から受注を登録します。${o.customerId ? '' : '<b>お客様を選択（または「＋ 新規」で登録）してください。</b>'}</div>` : ''}
+      ${parent ? `<div class="banner">受注 ${tag(parent.orderNo, 'is-order')} への追加の注文として、新しい受注を登録します。明細には追加分だけを入力してください。</div>` : ''}
+      ${pr ?`<div class="banner">見込み案件（${esc(pr.date)}｜${esc(pr.company)}）から受注を登録します。${o.customerId ? '' : '<b>お客様を選択（または「＋ 新規」で登録）してください。</b>'}</div>` : ''}
       <section class="card">
         <h2>受注内容</h2>
         <div class="grid-4">
@@ -1673,6 +1705,8 @@ function viewOrderForm(id, customerParam, prospectParam) {
       subject: f.subject.trim(), taxRate: toNum(f.taxRate), items, note: f.note,
       updatedAt: new Date().toISOString(),
     });
+    if (f.parentOrderId && getOrder(f.parentOrderId) && !excluded.has(f.parentOrderId)) o.parentOrderId = f.parentOrderId;
+    else delete o.parentOrderId;
     if (editing && o.billing !== editing.billing && !setBillingByHand(o, editing.billing, o.billing)) {
       return toast('保存をやめました（請求書の状況を元に戻すか、確認してからもう一度保存してください）', 'error');
     }
@@ -1691,6 +1725,8 @@ function viewOrderDetail(id) {
   if (!o) return notFound();
   const st = orderStatus(o);
   const cu = getPartner(o.customerId);
+  const parent = parentOf(o);
+  const children = childrenOf(o);
   const hasPo = posOf(o.id).some(isLive);
   const next = st.key === 'done'
     ? `<div class="next-step is-done"><span>✓ この受注は納品まで完了しています。</span></div>`
@@ -1705,10 +1741,13 @@ function viewOrderDetail(id) {
       <div><div class="crumb"><a href="#/orders">受注一覧</a> › 詳細</div>
         <h1>受注 ${tag(o.orderNo, 'is-order')} ${badge(st)}</h1></div>
       <div class="actions">
+        <a class="btn" href="#/orders/new?parent=${o.id}">＋ 追加の受注</a>
         <a class="btn" href="#/orders/${o.id}/edit">✎ 編集</a>
         <button class="btn btn-danger" data-act="delete">削除</button>
       </div>
     </div>
+    ${billedOutsideOrder(o) ? `<div class="banner">この受注は Excel で請求済みです。この受注の納品書はアプリでは請求できません。
+      追加の注文は、右上の「＋ 追加の受注」から新しい受注として登録してください。</div>` : ''}
     <section class="card">
       <h2>紐付け（受注 → 発注書 → 納品書）</h2>
       ${chainHTML(o, { currentId: o.id })}
@@ -1727,6 +1766,8 @@ function viewOrderDetail(id) {
         <div><dt>請求書</dt><dd><select data-act="billing" style="width:auto">${Object.keys(BILLING).map(b => `<option ${b === (o.billing || '未処理') ? 'selected' : ''}>${b}</option>`).join('')}</select></dd></div>
         <div class="span-2"><dt>お客様</dt><dd>${partnerLink(o.customerId)} ${cu?.contact ? `<span class="muted">／${esc(cu.contact)}</span>` : ''}</dd></div>
         <div class="span-2"><dt>件名</dt><dd>${esc(o.subject) || '—'}</dd></div>
+        ${o.parentOrderId ? `<div class="span-2"><dt>元の受注</dt><dd>${parent ? `<a href="#/orders/${parent.id}">${tag(parent.orderNo, 'is-order')}</a>` : '<span class="muted">（削除済み）</span>'}</dd></div>` : ''}
+        ${children.length ? `<div class="span-2"><dt>追加の受注</dt><dd>${children.map(x => `<a href="#/orders/${x.id}">${tag(x.orderNo, 'is-order')}</a>`).join(' ')}</dd></div>` : ''}
       </dl>
       ${itemsReadonlyHTML(o, { progress: true })}
       ${o.note ? `<p class="hint" style="white-space:pre-wrap">メモ：${esc(o.note)}</p>` : ''}
@@ -1746,10 +1787,11 @@ function viewOrderDetail(id) {
     if (issued) return alert(`この受注には発行済の発注書・納品書が ${issued} 件あります。\n受注を削除するには、先にそれらを「取消」してください。`);
     const drafts = docs.filter(x => stateOf(x) === 'draft').length;
     const voids = docs.length - drafts;
-    if (!confirm(`受注 ${o.orderNo} を削除します。${drafts ? `\n下書きの発注書・納品書 ${drafts} 件も削除します。` : ''}${voids ? `\n取消済の書類 ${voids} 件は控えとして残ります。` : ''}\nよろしいですか？`)) return;
+    if (!confirm(`受注 ${o.orderNo} を削除します。${drafts ? `\n下書きの発注書・納品書 ${drafts} 件も削除します。` : ''}${voids ? `\n取消済の書類 ${voids} 件は控えとして残ります。` : ''}${children.length ? `\n追加の受注 ${children.length} 件は残り、元の受注とのつながりが外れます。` : ''}\nよろしいですか？`)) return;
     db.pos = db.pos.filter(x => !(x.orderId === o.id && stateOf(x) === 'draft'));
     db.deliveries = db.deliveries.filter(x => !(x.orderId === o.id && stateOf(x) === 'draft'));
     db.orders = db.orders.filter(x => x.id !== o.id);
+    db.orders.forEach(x => { if (x.parentOrderId === o.id) delete x.parentOrderId; });
     db.prospects.forEach(p => { if (p.orderId === o.id) p.orderId = ''; });
     save();
     toast('受注を削除しました');
@@ -2724,7 +2766,9 @@ const billedOutside = (d, o) => {
 };
 // 受注が Excel で請求済みとして扱われているか（受注の印、または古い取り込みデータで移行した納品書がある）
 const billedOutsideOrder = o => o?.billedOutside === true || dnsOf(o.id).some(d => billedOutside(d, o));
-const UNBILL_CONFIRM = 'この受注は Excel で請求済みとして取り込まれています。「未処理」にすると、この受注の納品書をアプリで請求できるようになります。\nExcel で請求していないことを確認しましたか？';
+const UNBILL_CONFIRM = 'この受注は Excel で請求済みとして取り込まれています。「未処理」にすると、この受注の納品書をアプリで請求できるようになります。\n' +
+  '追加の注文を請求したい場合は「未処理」にせず、受注の画面の「＋ 追加の受注」から新しい受注として登録してください。\n' +
+  'この受注を Excel で請求していないことを確認しましたか？';
 // 手で請求書の状況を prev から next に変える（受注の画面・受注のフォーム）。確認でやめたら false。
 // Excel で請求済みの受注を「未処理」にするときは確認して印を外し（外したことを覚えておく）、その後アプリの請求書が
 // ないまま請求済みの状況に戻したら印を戻す（誤って「未処理」にしたときに二重請求にならないように）
@@ -3149,7 +3193,9 @@ function viewDnForm(id, orderIdParam) {
       <div><div class="crumb"><a href="#/deliveries">納品書一覧</a> › ${editing ? '編集' : '作成'}</div>
         <h1>${editing ? `納品書を編集 ${docTag('dn', d)}` : '納品書を作成'}</h1></div>
     </div>
-    ${allDelivered ? '<div class="banner">この受注は全数納品済みです。追加の納品がある場合のみ明細を入力してください。</div>' : ''}
+    ${src && billedOutsideOrder(src) ? `<div class="banner">この受注は Excel で請求済みです。ここで作る納品書はアプリでは請求できません。
+      追加の注文の場合は、受注の画面の「＋ 追加の受注」から新しい受注を登録し、その受注の納品書を作ってください。</div>`
+      : allDelivered ? '<div class="banner">この受注は全数納品済みです。追加の納品がある場合のみ明細を入力してください。</div>' : ''}
     <form id="doc-form" autocomplete="off">
       <section class="card">
         <h2>番号と紐付け</h2>
