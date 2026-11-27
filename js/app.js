@@ -1815,7 +1815,22 @@ function jpHolidays(y) {
   });
   return (holidayCache[y] = set);
 }
-const companyHolidays = () => new Set(String(db.settings.companyHolidays || '').split(/[\s,、]+/).filter(Boolean).map(s => s.replace(/\//g, '-')));
+// 会社の休業日：1 日（2026-12-29）か期間（2026-12-29〜2027-01-03、終わりは 01-03 だけでもよい）を、改行・カンマで区切って書く
+function parseHolidays(text) {
+  const set = new Set();
+  const day = (y, md) => { const m = /^(\d{1,2})-(\d{1,2})$/.exec(md); return m ? `${y}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}` : ''; };
+  String(text || '').split(/[\s,、]+/).filter(Boolean).forEach(tok => {
+    const m = /^(\d{4})-(\d{1,2}-\d{1,2})(?:[〜~～](?:(\d{4})-)?(\d{1,2}-\d{1,2}))?$/.exec(tok.replace(/\//g, '-'));
+    if (!m) return;
+    const from = day(m[1], m[2]);
+    if (!m[4]) return set.add(from);
+    let to = day(m[3] || m[1], m[4]);
+    if (!m[3] && to < from) to = day(+m[1] + 1, m[4]); // 12-29〜01-03 は翌年の 1 月まで
+    for (let d = from, n = 0; d <= to && n < 400; d = addDays(d, 1), n++) set.add(d);
+  });
+  return set;
+}
+const companyHolidays = () => parseHolidays(db.settings.companyHolidays);
 function isDayOff(s) {
   const dow = new Date(s + 'T00:00:00').getDay();
   return dow === 0 || dow === 6 || jpHolidays(+s.slice(0, 4)).has(s) || companyHolidays().has(s);
@@ -3833,9 +3848,10 @@ function viewSettings() {
             <p class="hint">書類ごとに変えることもできます。</p></div>
           <div class="field"><label>納期の警告 <span class="opt">（納期まで何日以内で知らせるか）</span></label>
             <input type="number" name="dueWarnDays" value="${esc(s.dueWarnDays)}" min="0" step="1" class="num" style="max-width:120px"></div>
-          <div class="field span-2"><label>会社の休業日 <span class="opt">（土日・祝日以外の休み。1 行に 1 日、例：2026-12-29）</span></label>
+          <div class="field span-2"><label>会社の休業日 <span class="opt">（土日・祝日以外の休み。1 行に 1 日か期間、例：2026-12-29〜2027-01-03）</span></label>
             <textarea name="companyHolidays" placeholder="2026-12-29&#10;2026-12-30">${esc(s.companyHolidays)}</textarea>
-            <p class="hint">取引先の請求書のルールで「請求日が土日祝・休業日のとき 前の平日にする」などを選んだときに使います。祝日は自動で判定します。</p></div>
+            <p class="hint">取引先の請求書のルールで「請求日が土日祝・休業日のとき 前の平日にする」などを選んだときに使います。祝日は自動で判定します。
+              ${(() => { const days = [...companyHolidays()].sort(); return days.length ? `今の登録：${days.length} 日（${esc(days[0])}〜${esc(days[days.length - 1])}）` : '今の登録：なし'; })()}</p></div>
         </div>
       </section>
       <div class="form-actions"><button class="btn btn-primary" type="submit">設定を保存する</button></div>
